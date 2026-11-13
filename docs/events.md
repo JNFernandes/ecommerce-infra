@@ -28,14 +28,14 @@ Rules that apply to every service:
 
 | Topic | Published by | Consumed by | Status |
 |---|---|---|---|
-| `orders.order-placed` | Orders | Payments, Inventory | implemented (Payments), planned (Inventory) |
+| `orders.order-placed` | Orders | Payments, Inventory | implemented |
 | `orders.order-confirmed` | Orders | Notifications | implemented (published), planned (consumer) |
 | `orders.order-cancelled` | Orders | Payments, Inventory, Notifications | implemented (Payments), planned (others) |
 | `payments.payment-processed` | Payments | Orders | implemented |
 | `payments.payment-failed` | Payments | Orders | implemented |
 | `payments.payment-refunded` | Payments | Notifications | implemented (published), planned (consumer) |
-| `inventory.stock-reserved` | Inventory | Orders | planned |
-| `inventory.stock-rejected` | Inventory | Orders | planned |
+| `inventory.stock-reserved` | Inventory | Orders | implemented (published), planned (consumer) |
+| `inventory.stock-rejected` | Inventory | Orders | implemented (published), planned (consumer) |
 | `inventory.stock-released` | Inventory | Notifications (optional) | planned |
 
 ## Orders events
@@ -103,9 +103,13 @@ Published after a Processed payment is refunded because its order was cancelled.
 | `currency` | string | ISO 4217. |
 | `refundedAt` | timestamp | |
 
-## Inventory events (planned)
+## Inventory events
 
 `aggregateId` is the reservation id. The order is identified by `orderId`.
+
+Inventory consolidates the order's lines first (lines for the same `productId` are summed), so
+`quantity` and `requested` are consolidated totals. They are JSON integers that can exceed the
+32-bit range; read them as 64-bit integers.
 
 ### `inventory.stock-reserved`
 
@@ -114,7 +118,7 @@ All items of the order were reserved atomically.
 | Field | Type | Notes |
 |---|---|---|
 | `orderId` | UUID | |
-| `items` | array | `{ "productId": string, "quantity": integer }` |
+| `items` | array | `{ "productId": string, "quantity": integer }`, one per product, sorted by `productId` |
 | `reservedAt` | timestamp | |
 
 ### `inventory.stock-rejected`
@@ -124,11 +128,11 @@ At least one item could not be reserved, and nothing was reserved.
 | Field | Type | Notes |
 |---|---|---|
 | `orderId` | UUID | |
-| `reason` | string | For example `insufficient stock` or `unknown product`. |
-| `items` | array | The items that failed: `{ "productId": string, "requested": integer, "available": integer }` |
+| `reason` | string | Exactly one of `insufficient stock`, `unknown product`, `unknown product and insufficient stock` (both kinds of failure in the same order). |
+| `items` | array | Only the items that failed, sorted by `productId`: `{ "productId": string, "requested": integer, "available": integer }`. `available` is `0` for an unknown product. |
 | `rejectedAt` | timestamp | |
 
-### `inventory.stock-released`
+### `inventory.stock-released` (planned)
 
 A reservation was released because its order was cancelled.
 

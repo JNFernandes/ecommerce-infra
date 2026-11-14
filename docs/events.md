@@ -30,13 +30,13 @@ Rules that apply to every service:
 |---|---|---|---|
 | `orders.order-placed` | Orders | Payments, Inventory | implemented |
 | `orders.order-confirmed` | Orders | Notifications | implemented (published), planned (consumer) |
-| `orders.order-cancelled` | Orders | Payments, Inventory, Notifications | implemented (Payments), planned (others) |
+| `orders.order-cancelled` | Orders | Payments, Inventory, Notifications | implemented (Payments, Inventory), planned (Notifications) |
 | `payments.payment-processed` | Payments | Orders | implemented |
 | `payments.payment-failed` | Payments | Orders | implemented |
 | `payments.payment-refunded` | Payments | Notifications | implemented (published), planned (consumer) |
 | `inventory.stock-reserved` | Inventory | Orders | implemented (published), planned (consumer) |
 | `inventory.stock-rejected` | Inventory | Orders | implemented (published), planned (consumer) |
-| `inventory.stock-released` | Inventory | Notifications (optional) | planned |
+| `inventory.stock-released` | Inventory | Notifications (optional) | implemented (published), planned (consumer) |
 
 ## Orders events
 
@@ -132,14 +132,15 @@ At least one item could not be reserved, and nothing was reserved.
 | `items` | array | Only the items that failed, sorted by `productId`: `{ "productId": string, "requested": integer, "available": integer }`. `available` is `0` for an unknown product. |
 | `rejectedAt` | timestamp | |
 
-### `inventory.stock-released` (planned)
+### `inventory.stock-released`
 
-A reservation was released because its order was cancelled.
+A reservation was released because its order was cancelled. Inventory publishes it only when stock
+was actually given back: cancelling a rejected or already released order publishes nothing.
 
 | Field | Type | Notes |
 |---|---|---|
 | `orderId` | UUID | |
-| `items` | array | `{ "productId": string, "quantity": integer }` |
+| `items` | array | The consolidated reserved quantities, one per product, sorted by `productId`: `{ "productId": string, "quantity": integer }` |
 | `releasedAt` | timestamp | |
 
 ## Order saga
@@ -159,3 +160,8 @@ Orders ── OrderPlaced ──┬─► Payments  ── PaymentProcessed / Pa
 ```
 
 Planned behavior: until the Inventory stories land, Orders confirms on `PaymentProcessed` alone.
+
+Cancellation before placement: the two Orders topics are separate, so Inventory can receive
+`OrderCancelled` before `OrderPlaced` for the same order. Inventory then records the cancellation and
+ignores the later `OrderPlaced` (nothing is reserved and nothing is published for it), so stock is
+never held for an order that is already cancelled.

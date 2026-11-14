@@ -34,8 +34,8 @@ Rules that apply to every service:
 | `payments.payment-processed` | Payments | Orders | implemented |
 | `payments.payment-failed` | Payments | Orders | implemented |
 | `payments.payment-refunded` | Payments | Notifications | implemented (published), planned (consumer) |
-| `inventory.stock-reserved` | Inventory | Orders | implemented (published), planned (consumer) |
-| `inventory.stock-rejected` | Inventory | Orders | implemented (published), planned (consumer) |
+| `inventory.stock-reserved` | Inventory | Orders | implemented |
+| `inventory.stock-rejected` | Inventory | Orders | implemented |
 | `inventory.stock-released` | Inventory | Notifications (optional) | implemented (published), planned (consumer) |
 
 ## Orders events
@@ -54,7 +54,7 @@ Item: `{ "productId": string, "quantity": integer, "unitPrice": number }`.
 
 ### `orders.order-confirmed`
 
-Published after a pending order is confirmed. `aggregateId` is the order id.
+Published after a pending order is confirmed: when both its payment is processed and its stock is reserved (see [Order saga](#order-saga)), or when an operator confirms it manually. `aggregateId` is the order id.
 
 | Field | Type | Notes |
 |---|---|---|
@@ -67,7 +67,7 @@ Published after a pending order is cancelled. `aggregateId` is the order id. Onl
 | Field | Type | Notes |
 |---|---|---|
 | `customerId` | UUID | |
-| `reason` | string, optional | Present only when the cancellation had a reason (today: payment failures). Omitted otherwise. |
+| `reason` | string, optional | Present when the cancellation came from an outcome: `payment failed: <reason>` or `stock rejected: <reason>` (just `payment failed` / `stock rejected` when the source reason is empty). Omitted for a cancellation requested through the Orders API. |
 
 This event is the compensation trigger. Payments refunds a processed payment for the order, and Inventory releases a reserved stock. Both ignore the event when there is nothing to undo.
 
@@ -159,7 +159,16 @@ Orders ── OrderPlaced ──┬─► Payments  ── PaymentProcessed / Pa
                        Inventory releases a Reserved stock   (StockReleased)
 ```
 
-Planned behavior: until the Inventory stories land, Orders confirms on `PaymentProcessed` alone.
+How Orders joins the two outcomes (Orders US-09):
+
+- The outcomes can arrive in either order. The first positive one is recorded and the order stays
+  pending; the order is confirmed when the second positive one arrives.
+- The first negative outcome cancels the order at once, without waiting for the other one.
+- An outcome for an order that is no longer pending is ignored (and logged). A `PaymentProcessed`
+  for an order that is already cancelled is logged as a warning, because that payment needs the
+  refund that `OrderCancelled` triggers.
+- A second outcome on the same side that contradicts the first (a failure after a processed
+  payment, a rejection after a reserved stock) is ignored with a warning: the first one wins.
 
 Cancellation before placement: the two Orders topics are separate, so Inventory can receive
 `OrderCancelled` before `OrderPlaced` for the same order. Inventory then records the cancellation and

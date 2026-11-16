@@ -194,6 +194,8 @@ services:
     environment:
       ConnectionStrings__Payments: Host=postgres-payments;Port=5432;Database=payments;Username=payments_user;Password=payments_pass
       Kafka__BootstrapServers: kafka:29092
+      # The outbox relay polls every 250 ms; keep its SQL out of the logs.
+      Logging__LogLevel__Microsoft.EntityFrameworkCore.Database.Command: Warning
 
   # Flyway migrates on startup. The "local" Spring profile adds the idempotent sample stock
   # (SKU-001..SKU-005, db/local/R__seed_local_stock.sql). The image's own HEALTHCHECK polls

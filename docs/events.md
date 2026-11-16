@@ -29,8 +29,8 @@ Rules that apply to every service:
 | Topic | Published by | Consumed by | Status |
 |---|---|---|---|
 | `orders.order-placed` | Orders | Payments, Inventory, Notifications | implemented |
-| `orders.order-confirmed` | Orders | Notifications | implemented (published), planned (consumer) |
-| `orders.order-cancelled` | Orders | Payments, Inventory, Notifications | implemented (Payments, Inventory), planned (Notifications) |
+| `orders.order-confirmed` | Orders | Notifications | implemented |
+| `orders.order-cancelled` | Orders | Payments, Inventory, Notifications | implemented |
 | `payments.payment-processed` | Payments | Orders | implemented |
 | `payments.payment-failed` | Payments | Orders | implemented |
 | `payments.payment-refunded` | Payments | Notifications | implemented (published), planned (consumer) |
@@ -74,6 +74,12 @@ Published after a pending order is cancelled. `aggregateId` is the order id. Onl
 | `reason` | string, optional | Present when the cancellation came from an outcome: `payment failed: <reason>` or `stock rejected: <reason>` (just `payment failed` / `stock rejected` when the source reason is empty). Omitted for a cancellation requested through the Orders API. |
 
 This event is the compensation trigger. Payments refunds a processed payment for the order, and Inventory releases a reserved stock. Both ignore the event when there is nothing to undo.
+
+Notifications records an "order cancelled" notification for `customerId` and shows `reason` in the
+message when present (trimmed, on one line, at most 500 characters); without a reason the message
+is generic. A `reason` that is not a string or `null` makes the message invalid. Notifications
+also records an "order confirmed" notification for every `orders.order-confirmed` event. Neither
+event needs `orders.order-placed` to have been received first.
 
 ## Payments events
 

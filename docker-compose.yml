@@ -177,6 +177,24 @@ services:
       retries: 6
       start_period: 30s
 
+  # Worker with no HTTP endpoint and a shell-less (chiseled) image, so no healthcheck.
+  # Applies its EF Core migrations itself on startup.
+  payments:
+    profiles: ["apps"]
+    build:
+      context: ../ecommerce-payments
+    restart: on-failure
+    depends_on:
+      kafka:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+      postgres-payments:
+        condition: service_healthy
+    environment:
+      ConnectionStrings__Payments: Host=postgres-payments;Port=5432;Database=payments;Username=payments_user;Password=payments_pass
+      Kafka__BootstrapServers: kafka:29092
+
 volumes:
   kafka-data:
   orders-pg-data:

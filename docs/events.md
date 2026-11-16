@@ -28,7 +28,7 @@ Rules that apply to every service:
 
 | Topic | Published by | Consumed by | Status |
 |---|---|---|---|
-| `orders.order-placed` | Orders | Payments, Inventory | implemented |
+| `orders.order-placed` | Orders | Payments, Inventory, Notifications | implemented |
 | `orders.order-confirmed` | Orders | Notifications | implemented (published), planned (consumer) |
 | `orders.order-cancelled` | Orders | Payments, Inventory, Notifications | implemented (Payments, Inventory), planned (Notifications) |
 | `payments.payment-processed` | Payments | Orders | implemented |
@@ -51,6 +51,10 @@ Published after the order is saved. `aggregateId` is the order id.
 | `totalAmount` | number | Sum of all item subtotals. |
 
 Item: `{ "productId": string, "quantity": integer, "unitPrice": number }`.
+
+Notifications uses `customerId` and `totalAmount` (read as an exact decimal) to record the "order
+received" notification, and remembers both per order so it can address the later refund
+notification, whose event has no `customerId`. It does not read `items`.
 
 ### `orders.order-confirmed`
 

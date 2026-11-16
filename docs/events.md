@@ -33,7 +33,7 @@ Rules that apply to every service:
 | `orders.order-cancelled` | Orders | Payments, Inventory, Notifications | implemented |
 | `payments.payment-processed` | Payments | Orders | implemented |
 | `payments.payment-failed` | Payments | Orders | implemented |
-| `payments.payment-refunded` | Payments | Notifications | implemented (published), planned (consumer) |
+| `payments.payment-refunded` | Payments | Notifications | implemented |
 | `inventory.stock-reserved` | Inventory | Orders | implemented |
 | `inventory.stock-rejected` | Inventory | Orders | implemented |
 | `inventory.stock-released` | Inventory | Notifications (optional) | implemented (published), planned (consumer) |
@@ -112,6 +112,11 @@ Published after a Processed payment is refunded because its order was cancelled.
 | `amount` | decimal | The full amount of the payment. |
 | `currency` | string | ISO 4217. |
 | `refundedAt` | timestamp | |
+
+Notifications records a "payment refunded" notification with the amount and currency. The event
+has no `customerId`, so Notifications finds the customer through the order context it recorded
+from `orders.order-placed` (by `orderId`, never `aggregateId`). If that context is missing, the
+refund is retried and then dead-lettered; it is never sent without a customer.
 
 ## Inventory events
 

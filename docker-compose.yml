@@ -134,6 +134,103 @@ services:
       retries: 10
       start_period: 15s
 
+  # ---------------------------------------------------------------- Application services (profile "apps")
+  # Built from the sibling repositories. Start with: docker compose --profile apps up -d --build
+  orders:
+    profiles: ["apps"]
+    build:
+      context: ../ecommerce-orders
+    restart: on-failure
+    depends_on:
+      kafka:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+      postgres-orders:
+        condition: service_healthy
+      mongo:
+        condition: service_healthy
+    environment:
+      PORT: "3000"
+      DB_HOST: postgres-orders
+      DB_PORT: "5432"
+      DB_USERNAME: orders_user
+      DB_PASSWORD: orders_pass
+      DB_NAME: orders
+      KAFKA_BROKERS: kafka:29092
+      MONGO_URI: mongodb://mongo_user:mongo_pass@mongo:27017/orders_read?authSource=admin
+    # Orders applies its TypeORM migrations itself on startup (DB_MIGRATIONS_RUN, default true).
+    ports:
+      - "3000:3000"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:3000/api || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
+
+  # One-shot: seeds the demo customer (the compiled seed:customers script) once Orders is
+  # healthy, i.e. its migrations have run, then exits. Idempotent.
+  orders-seed:
+    profiles: ["apps"]
+    build:
+      context: ../ecommerce-orders
+    restart: "no"
+    depends_on:
+      orders:
+        condition: service_healthy
+    environment:
+      DB_HOST: postgres-orders
+      DB_PORT: "5432"
+      DB_USERNAME: orders_user
+      DB_PASSWORD: orders_pass
+      DB_NAME: orders
+    command: ["node", "dist/infra/database/seeds/seed-customers.js"]
+
+  # Worker with no HTTP endpoint and a shell-less (chiseled) image, so no healthcheck.
+  # Applies its EF Core migrations itself on startup.
+  payments:
+    profiles: ["apps"]
+    build:
+      context: ../ecommerce-payments
+    restart: on-failure
+    depends_on:
+      kafka:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+      postgres-payments:
+        condition: service_healthy
+    environment:
+      ConnectionStrings__Payments: Host=postgres-payments;Port=5432;Database=payments;Username=payments_user;Password=payments_pass
+      Kafka__BootstrapServers: kafka:29092
+      # The outbox relay polls every 250 ms; keep its SQL out of the logs.
+      Logging__LogLevel__Microsoft.EntityFrameworkCore.Database.Command: Warning
+
+  # Flyway migrates on startup. The "local" Spring profile adds the idempotent sample stock
+  # (SKU-001..SKU-005, db/local/R__seed_local_stock.sql). The image's own HEALTHCHECK polls
+  # /actuator/health; it is published on 8081 (8080 belongs to kafka-ui).
+  inventory:
+    profiles: ["apps"]
+    build:
+      context: ../ecommerce-inventory
+    restart: on-failure
+    depends_on:
+      kafka:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+      postgres-inventory:
+        condition: service_healthy
+    environment:
+      SPRING_PROFILES_ACTIVE: local
+      DB_URL: jdbc:postgresql://postgres-inventory:5432/inventory
+      DB_USERNAME: inventory_user
+      DB_PASSWORD: inventory_pass
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+    ports:
+      - "8081:8080"
+
 volumes:
   kafka-data:
   orders-pg-data:

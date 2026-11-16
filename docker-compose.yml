@@ -134,6 +134,49 @@ services:
       retries: 10
       start_period: 15s
 
+  # ---------------------------------------------------------------- Application services (profile "apps")
+  # Built from the sibling repositories. Start with: docker compose --profile apps up -d --build
+  orders:
+    profiles: ["apps"]
+    build:
+      context: ../ecommerce-orders
+    restart: on-failure
+    depends_on:
+      kafka:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+      postgres-orders:
+        condition: service_healthy
+      mongo:
+        condition: service_healthy
+    environment:
+      PORT: "3000"
+      DB_HOST: postgres-orders
+      DB_PORT: "5432"
+      DB_USERNAME: orders_user
+      DB_PASSWORD: orders_pass
+      DB_NAME: orders
+      KAFKA_BROKERS: kafka:29092
+      MONGO_URI: mongodb://mongo_user:mongo_pass@mongo:27017/orders_read?authSource=admin
+    # The image only starts the app, so apply the TypeORM migrations and the idempotent
+    # customer seed (the compiled seed:customers script) first.
+    command:
+      - sh
+      - -c
+      - >-
+        node node_modules/typeorm/cli.js migration:run -d dist/infra/database/typeorm.datasource.js
+        && node dist/infra/database/seeds/seed-customers.js
+        && exec node dist/main
+    ports:
+      - "3000:3000"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:3000/api || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
+
 volumes:
   kafka-data:
   orders-pg-data:

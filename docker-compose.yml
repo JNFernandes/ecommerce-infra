@@ -195,6 +195,30 @@ services:
       ConnectionStrings__Payments: Host=postgres-payments;Port=5432;Database=payments;Username=payments_user;Password=payments_pass
       Kafka__BootstrapServers: kafka:29092
 
+  # Flyway migrates on startup. The "local" Spring profile adds the idempotent sample stock
+  # (SKU-001..SKU-005, db/local/R__seed_local_stock.sql). The image's own HEALTHCHECK polls
+  # /actuator/health; it is published on 8081 (8080 belongs to kafka-ui).
+  inventory:
+    profiles: ["apps"]
+    build:
+      context: ../ecommerce-inventory
+    restart: on-failure
+    depends_on:
+      kafka:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+      postgres-inventory:
+        condition: service_healthy
+    environment:
+      SPRING_PROFILES_ACTIVE: local
+      DB_URL: jdbc:postgresql://postgres-inventory:5432/inventory
+      DB_USERNAME: inventory_user
+      DB_PASSWORD: inventory_pass
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+    ports:
+      - "8081:8080"
+
 volumes:
   kafka-data:
   orders-pg-data:

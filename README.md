@@ -72,7 +72,8 @@ docker compose --profile apps up -d --build
 Add `--profile tools` to either command to also start Kafka UI on http://localhost:8080.
 
 `docker compose --profile apps ps` should show `orders` and `inventory` as `healthy`,
-`payments` as `Up` (it has no HTTP endpoint), and `kafka-init` as `Exited (0)`.
+`payments` as `Up` (it has no HTTP endpoint). Add `-a` to also see `kafka-init` and `orders-seed`,
+which should both be `Exited (0)`.
 
 What happens on start:
 
@@ -80,10 +81,11 @@ What happens on start:
 2. `kafka-init` creates the topics (idempotent) and exits.
 3. The services start once their database and Kafka are healthy and `kafka-init` has finished.
    They restart on failure, so a service that loses Kafka at startup recovers.
-4. Each service migrates its own schema: Orders runs the TypeORM migrations before starting,
-   Payments applies EF Core migrations on startup, Inventory runs Flyway.
+4. Each service migrates its own schema on startup: Orders with TypeORM, Payments with EF Core,
+   Inventory with Flyway.
 5. Demo data is loaded, idempotently (existing rows are never changed):
-   - Orders: customer `3fa85f64-5717-4562-b3fc-2c963f66afa6` (the `seed:customers` script).
+   - Orders: customer `3fa85f64-5717-4562-b3fc-2c963f66afa6`, by the one-shot `orders-seed`
+     container (the `seed:customers` script), which runs once Orders is healthy and then exits.
    - Inventory: the sample stock below (Spring profile `local`, `db/local/R__seed_local_stock.sql`).
 
 | Product | Available |
@@ -126,8 +128,11 @@ Start everything with `--profile apps`. Every scenario places an order for the s
 then reads it back through GraphQL. The saga takes a second or two, so a query right after the
 `POST` may still show `PENDING`; query again.
 
-Place an order (bash; in PowerShell use `curl.exe` and escape the inner quotes, or use Postman or
-Swagger at http://localhost:3000/api):
+You can also use Postman, or Swagger at http://localhost:3000/api to place orders.
+
+### bash (Linux, macOS, Git Bash, WSL)
+
+Place an order:
 
 ```bash
 curl -s -X POST localhost:3000/orders -H 'content-type: application/json' -d '{
@@ -145,7 +150,33 @@ curl -s localhost:3000/graphql -H 'content-type: application/json' -d '{
 }'
 ```
 
-In Postman: `POST http://localhost:3000/graphql`, body type GraphQL, with the same query.
+### PowerShell (Windows)
+
+In Windows PowerShell, `curl` is an alias for `Invoke-WebRequest`, so use `Invoke-RestMethod`:
+
+```powershell
+# Place an order
+$body = @{
+  customerId = '3fa85f64-5717-4562-b3fc-2c963f66afa6'
+  items      = @(@{ productId = 'SKU-003'; quantity = 2; unitPrice = 19.99 })
+} | ConvertTo-Json -Depth 5
+$r = Invoke-RestMethod -Method Post -Uri http://localhost:3000/orders -ContentType 'application/json' -Body $body
+$r.orderId
+
+# Read it back
+$q = @{ query = "{ order(orderId: `"$($r.orderId)`") { orderId status totalAmount cancellationReason items { productId quantity } } }" } | ConvertTo-Json
+(Invoke-RestMethod -Method Post -Uri http://localhost:3000/graphql -ContentType 'application/json' -Body $q).data.order | Format-List
+```
+
+For the other scenarios, change `items` as in the table below, for example
+`items = @(@{ productId = 'SKU-999'; quantity = 1; unitPrice = 9.99 })`.
+
+### Postman
+
+`POST http://localhost:3000/orders` with a raw JSON body as above, then
+`POST http://localhost:3000/graphql` with body type GraphQL and the same query.
+
+### Expected results
 
 | Scenario | Items in the request | Expected `status` and `cancellationReason` | Side effects |
 |---|---|---|---|
@@ -181,6 +212,9 @@ rows alone.
   port mapping.
 - **`build context ../ecommerce-… not found`**: the service repositories must sit next to this
   one (see [Prerequisites](#prerequisites)).
+- **`orders-seed` fails with `relation "customers" does not exist`**: your `ecommerce-orders`
+  checkout is older than the version that migrates on startup. Update it and rebuild with
+  `--build`.
 - **Code changes not picked up**: add `--build` to `up`, so the images are rebuilt.
 - **Orders stays `PENDING`**: check that `payments` and `inventory` are running and that
   `kafka-init` exited with code 0 (`docker compose --profile apps ps -a`). Any message that fails

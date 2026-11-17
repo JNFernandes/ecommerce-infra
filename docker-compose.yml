@@ -159,6 +159,8 @@ services:
       DB_NAME: orders
       KAFKA_BROKERS: kafka:29092
       MONGO_URI: mongodb://mongo_user:mongo_pass@mongo:27017/orders_read?authSource=admin
+      # Browser origins allowed to call REST and /graphql; override from the host environment.
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:5173}
     # Orders applies its TypeORM migrations itself on startup (DB_MIGRATIONS_RUN, default true).
     ports:
       - "3000:3000"
@@ -208,8 +210,9 @@ services:
       Logging__LogLevel__Microsoft.EntityFrameworkCore.Database.Command: Warning
 
   # Flyway migrates on startup. The "local" Spring profile adds the idempotent sample stock
-  # (SKU-001..SKU-005, db/local/R__seed_local_stock.sql). The image's own HEALTHCHECK polls
-  # /actuator/health; it is published on 8081 (8080 belongs to kafka-ui).
+  # (SKU-001..SKU-005, db/local/R__seed_local_stock.sql). Listens on 8081 inside the container
+  # too (SERVER_PORT; 8080 belongs to kafka-ui). The image's own HEALTHCHECK probes 8080, so it
+  # is overridden here to poll /actuator/health on 8081.
   inventory:
     profiles: ["apps"]
     build:
@@ -228,8 +231,17 @@ services:
       DB_USERNAME: inventory_user
       DB_PASSWORD: inventory_pass
       KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      SERVER_PORT: "8081"
+      # Browser origins allowed to call the catalog (GET only); override from the host environment.
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:5173}
     ports:
-      - "8081:8080"
+      - "8081:8081"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:8081/actuator/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+      start_period: 40s
 
   # Records a notification per order event in MongoDB (database "notifications") and serves
   # them read-only over HTTP. Creates its MongoDB indexes itself on startup. The healthcheck

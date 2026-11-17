@@ -201,6 +201,20 @@ Cancellation before placement: the two Orders topics are separate, so Inventory 
 ignores the later `OrderPlaced` (nothing is reserved and nothing is published for it), so stock is
 never held for an order that is already cancelled.
 
+## HTTP APIs
+
+Kafka events remain the **only** service-to-service communication: no service calls another over
+HTTP. The HTTP APIs exist for clients (a browser frontend, curl, Postman), not for other services.
+Besides the Orders API (REST to place, cancel and confirm orders; GraphQL read model), they are:
+
+| API | Base URL (local) | Purpose | Status |
+|---|---|---|---|
+| Inventory products API | `http://localhost:8081` | Read-only catalog with available stock: `GET /products`, `GET /products/{id}`. Contract in [`ecommerce-inventory`](../../ecommerce-inventory/README.md); Swagger UI at `/swagger-ui.html`. | implemented |
+| Notifications read API | `http://localhost:8000` | Read-only access to recorded notifications, see [below](#notifications-read-api). | implemented |
+
+Both read their service's own database only. All three APIs allow browser calls from the origins
+in `CORS_ALLOWED_ORIGINS` (see the README).
+
 ## Notifications read API
 
 Notifications publishes no events. What it recorded is read over a read-only HTTP API (port 8000;

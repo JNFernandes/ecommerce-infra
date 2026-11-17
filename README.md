@@ -9,7 +9,7 @@ the services from their sibling repositories.
 |---|---|---|---|
 | Orders | `../ecommerce-orders` | NestJS, TypeORM | REST API to place, cancel and confirm orders; GraphQL read model; joins the payment and stock outcomes |
 | Payments | `../ecommerce-payments` | .NET worker, EF Core | Charges each placed order (fails above 10 000.00), refunds cancelled orders |
-| Inventory | `../ecommerce-inventory` | Spring Boot, Flyway | Reserves stock for each placed order, releases it when the order is cancelled |
+| Inventory | `../ecommerce-inventory` | Spring Boot, Flyway | Reserves stock for each placed order, releases it when the order is cancelled; read-only products API |
 | Notifications | `../ecommerce-notifications` | Python, FastAPI, MongoDB | Records a customer notification for each order event (sending is simulated); read-only HTTP API |
 
 ## Architecture
@@ -114,9 +114,9 @@ and the internal port.
 
 | Component | Host | Internal | Database | User / password |
 |---|---|---|---|---|
-| Orders (REST, GraphQL, Swagger at `/api`) | `localhost:3000` | `orders:3000` | | |
-| Inventory actuator health | `localhost:8081` | `inventory:8080` | | |
-| Notifications (REST, docs at `/docs`, health at `/health/ready`) | `localhost:8000` | `notifications:8000` | | |
+| Orders (REST, GraphQL at `/graphql`, Swagger at `/api`) | `localhost:3000` | `orders:3000` | | |
+| Inventory (products API, Swagger UI at `/swagger-ui.html`, health at `/actuator/health`) | `localhost:8081` | `inventory:8081` | | |
+| Notifications (read API, docs at `/docs`, health at `/health/ready`) | `localhost:8000` | `notifications:8000` | | |
 | Payments | not published | | | |
 | Kafka | `localhost:9092` | `kafka:29092` | | |
 | Kafka UI (`tools` profile) | `localhost:8080` | | | |
@@ -125,12 +125,58 @@ and the internal port.
 | Postgres Payments | `localhost:5434` | `postgres-payments:5432` | `payments` | `payments_user` / `payments_pass` |
 | MongoDB | `localhost:27017` | `mongo:27017` | `orders_read` (Orders read model), `notifications` (Notifications) | `mongo_user` / `mongo_pass`, auth database `admin` |
 
-These credentials are for local development only.
+These credentials are for local development only. Notifications consumes in the Kafka group
+`notifications-service`.
 
-Notifications consumes in the Kafka group `notifications-service` and allows browser calls
-(`GET` only) from `http://localhost:5173` by default. To change the origins, set
-`CORS_ALLOWED_ORIGINS` (comma-separated) in the host environment before `up`, for example
-`CORS_ALLOWED_ORIGINS=http://localhost:5173,http://localhost:4200 docker compose --profile apps up -d`.
+## HTTP APIs
+
+Three services have an HTTP API for clients such as a browser frontend. They have no
+authentication and are meant for local and demo use. Services never call each other over HTTP:
+Kafka events remain the only service-to-service communication (see
+[docs/events.md](docs/events.md#http-apis)).
+
+| Service | Endpoints | Interactive docs |
+|---|---|---|
+| Orders `localhost:3000` | `POST /orders`, `POST /orders/{orderId}/cancel`, `POST /orders/{orderId}/confirm`; GraphQL `POST /graphql` with the queries `order(orderId)` and `orders(status, customerId, limit, offset)` | Swagger UI at http://localhost:3000/api |
+| Inventory `localhost:8081` | `GET /products?limit=&offset=`, `GET /products/{id}` (404 if unknown), `GET /actuator/health` | Swagger UI at http://localhost:8081/swagger-ui.html, OpenAPI at `/v3/api-docs` |
+| Notifications `localhost:8000` | `GET /notifications?customerId=&orderId=&type=&limit=&offset=`, `GET /notifications/{id}` (404 if unknown), `GET /health/live`, `GET /health/ready` | http://localhost:8000/docs, OpenAPI at `/openapi.json` |
+
+```bash
+# Orders: place an order, then read orders through GraphQL
+curl -s -X POST localhost:3000/orders -H 'content-type: application/json' \
+  -d '{"customerId":"3fa85f64-5717-4562-b3fc-2c963f66afa6","items":[{"productId":"SKU-003","quantity":2,"unitPrice":19.99}]}'
+curl -s localhost:3000/graphql -H 'content-type: application/json' \
+  -d '{"query":"{ orders(customerId: \"3fa85f64-5717-4562-b3fc-2c963f66afa6\", limit: 5) { totalCount items { orderId status totalAmount } } }"}'
+
+# Inventory: the catalog with available stock, or one product
+curl -s localhost:8081/products
+curl -s localhost:8081/products/SKU-003
+
+# Notifications: what the customer was told
+curl -s "localhost:8000/notifications?customerId=3fa85f64-5717-4562-b3fc-2c963f66afa6"
+```
+
+### CORS
+
+All three APIs read the same variable, `CORS_ALLOWED_ORIGINS` (comma-separated exact origins).
+The compose file defaults it to `http://localhost:5173`, a frontend dev server, for all three. To
+change it, set it in the host environment before `up`; the value applies to every service:
+
+```bash
+CORS_ALLOWED_ORIGINS=http://localhost:5173,http://localhost:4200 docker compose --profile apps up -d
+```
+
+```powershell
+$env:CORS_ALLOWED_ORIGINS = 'http://localhost:5173,http://localhost:4200'
+docker compose --profile apps up -d
+```
+
+Allowed methods: Orders `GET`, `POST` (and preflight `OPTIONS`); Inventory and Notifications `GET`
+only. Any other origin gets no CORS headers, so the browser blocks the call. Check it with:
+
+```bash
+curl -s -D - -o /dev/null -H 'Origin: http://localhost:5173' localhost:8081/products | grep -i access-control
+```
 
 ### Kafka topics
 
@@ -286,9 +332,10 @@ rows alone.
   `docker compose exec mongo mongosh -u mongo_user -p mongo_pass --authenticationDatabase admin notifications --eval 'db.inbound_dead_letters.find()'`.
   A refund whose order placement was never received is dead-lettered with
   `errorType: "OrderContextNotFoundError"` and is not recorded later.
-- **Browser call to Notifications blocked by CORS**: the page's origin is not in
-  `CORS_ALLOWED_ORIGINS` (default `http://localhost:5173`). Set it in the host environment and
-  recreate the container with `docker compose --profile apps up -d notifications`.
-- **`port is already allocated` on 9092 or 8000**: often another project's Kafka container, or a
-  Notifications dev server (`uvicorn --port 8000`) still running from the IDE. `docker ps` and
+- **Browser call blocked by CORS**: the page's origin is not in `CORS_ALLOWED_ORIGINS` (default
+  `http://localhost:5173`). Set it in the host environment and recreate the containers with
+  `docker compose --profile apps up -d` (see [CORS](#cors)).
+- **`port is already allocated` on 9092, 8000 or 8081**: often another project's Kafka
+  container, or a Notifications (`uvicorn --port 8000`) or Inventory (Spring Boot, 8081) dev
+  server still running from the IDE. `docker ps` and
   `netstat -ano | findstr :8000` show the owner.

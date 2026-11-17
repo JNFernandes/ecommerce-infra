@@ -10,6 +10,7 @@ the services from their sibling repositories.
 | Orders | `../ecommerce-orders` | NestJS, TypeORM | REST API to place, cancel and confirm orders; GraphQL read model; joins the payment and stock outcomes |
 | Payments | `../ecommerce-payments` | .NET worker, EF Core | Charges each placed order (fails above 10 000.00), refunds cancelled orders |
 | Inventory | `../ecommerce-inventory` | Spring Boot, Flyway | Reserves stock for each placed order, releases it when the order is cancelled |
+| Notifications | `../ecommerce-notifications` | Python, FastAPI, MongoDB | Records a customer notification for each order event (sending is simulated); read-only HTTP API |
 
 ## Architecture
 
@@ -32,12 +33,21 @@ the services from their sibling repositories.
         │           │ refunded              │           │
         └─────┬─────┘                       └─────┬─────┘
      postgres-payments                     postgres-inventory
+
+   orders.order-placed / -confirmed / -cancelled, payments.payment-refunded
+                                │  (from Kafka)
+                       ┌────────▼────────┐  writes   ┌───────────────────────┐
+                       │  Notifications  ├──────────►│ mongo (notifications) │
+                       └────────▲────────┘           └───────────────────────┘
+                                │
+                REST :8000  GET /notifications (read-only)
 ```
 
 An order starts `PENDING`. It becomes `CONFIRMED` when the payment is processed **and** the stock
 is reserved, and `CANCELLED` as soon as either fails. A cancellation makes Payments refund a
-processed payment and Inventory release a reserved stock. Topics, payloads and the saga are
-specified in [docs/events.md](docs/events.md).
+processed payment and Inventory release a reserved stock. Notifications follows the saga without
+taking part in it: it records one notification per order event and publishes nothing. Topics,
+payloads, the saga and the Notifications read API are specified in [docs/events.md](docs/events.md).
 
 ## Prerequisites
 
@@ -49,10 +59,11 @@ specified in [docs/events.md](docs/events.md).
   ├── ecommerce-infra/        (this repository)
   ├── ecommerce-orders/
   ├── ecommerce-payments/
-  └── ecommerce-inventory/
+  ├── ecommerce-inventory/
+  └── ecommerce-notifications/
   ```
 
-- Free host ports: 3000, 5432, 5433, 5434, 8080 (only with `tools`), 8081, 9092, 27017.
+- Free host ports: 3000, 5432, 5433, 5434, 8000, 8080 (only with `tools`), 8081, 9092, 27017.
 
 ## Run
 
@@ -71,7 +82,7 @@ docker compose --profile apps up -d --build
 
 Add `--profile tools` to either command to also start Kafka UI on http://localhost:8080.
 
-`docker compose --profile apps ps` should show `orders` and `inventory` as `healthy`,
+`docker compose --profile apps ps` should show `orders`, `inventory` and `notifications` as `healthy`,
 `payments` as `Up` (it has no HTTP endpoint). Add `-a` to also see `kafka-init` and `orders-seed`,
 which should both be `Exited (0)`.
 
@@ -82,7 +93,7 @@ What happens on start:
 3. The services start once their database and Kafka are healthy and `kafka-init` has finished.
    They restart on failure, so a service that loses Kafka at startup recovers.
 4. Each service migrates its own schema on startup: Orders with TypeORM, Payments with EF Core,
-   Inventory with Flyway.
+   Inventory with Flyway. Notifications creates its MongoDB indexes (database `notifications`).
 5. Demo data is loaded, idempotently (existing rows are never changed):
    - Orders: customer `3fa85f64-5717-4562-b3fc-2c963f66afa6`, by the one-shot `orders-seed`
      container (the `seed:customers` script), which runs once Orders is healthy and then exits.
@@ -105,15 +116,21 @@ and the internal port.
 |---|---|---|---|---|
 | Orders (REST, GraphQL, Swagger at `/api`) | `localhost:3000` | `orders:3000` | | |
 | Inventory actuator health | `localhost:8081` | `inventory:8080` | | |
+| Notifications (REST, docs at `/docs`, health at `/health/ready`) | `localhost:8000` | `notifications:8000` | | |
 | Payments | not published | | | |
 | Kafka | `localhost:9092` | `kafka:29092` | | |
 | Kafka UI (`tools` profile) | `localhost:8080` | | | |
 | Postgres Orders | `localhost:5432` | `postgres-orders:5432` | `orders` | `orders_user` / `orders_pass` |
 | Postgres Inventory | `localhost:5433` | `postgres-inventory:5432` | `inventory` | `inventory_user` / `inventory_pass` |
 | Postgres Payments | `localhost:5434` | `postgres-payments:5432` | `payments` | `payments_user` / `payments_pass` |
-| MongoDB | `localhost:27017` | `mongo:27017` | `orders_read` (Orders read model) | `mongo_user` / `mongo_pass`, auth database `admin` |
+| MongoDB | `localhost:27017` | `mongo:27017` | `orders_read` (Orders read model), `notifications` (Notifications) | `mongo_user` / `mongo_pass`, auth database `admin` |
 
 These credentials are for local development only.
+
+Notifications consumes in the Kafka group `notifications-service` and allows browser calls
+(`GET` only) from `http://localhost:5173` by default. To change the origins, set
+`CORS_ALLOWED_ORIGINS` (comma-separated) in the host environment before `up`, for example
+`CORS_ALLOWED_ORIGINS=http://localhost:5173,http://localhost:4200 docker compose --profile apps up -d`.
 
 ### Kafka topics
 
@@ -125,8 +142,9 @@ Created by `kafka-init` with 3 partitions and replication factor 1 (auto-creatio
 ## Demo scenarios
 
 Start everything with `--profile apps`. Every scenario places an order for the seeded customer,
-then reads it back through GraphQL. The saga takes a second or two, so a query right after the
-`POST` may still show `PENDING`; query again.
+reads it back through GraphQL, then reads the notifications it produced. The saga takes a second
+or two, so a query right after the `POST` may still show `PENDING` or fewer notifications; query
+again.
 
 You can also use Postman, or Swagger at http://localhost:3000/api to place orders.
 
@@ -150,6 +168,20 @@ curl -s localhost:3000/graphql -H 'content-type: application/json' -d '{
 }'
 ```
 
+Read its notifications (newest first), or all of the customer's:
+
+```bash
+curl -s "localhost:8000/notifications?orderId=<id>"
+curl -s "localhost:8000/notifications?customerId=3fa85f64-5717-4562-b3fc-2c963f66afa6"
+# → {"items":[{"id":"…","customerId":"3fa85f64-…","orderId":"<id>","type":"ORDER_CONFIRMED",
+#     "channel":"email","message":"Your order <id> was confirmed.","status":"SENT",
+#     "createdAt":"…","sourceEventId":"…"}, …],"total":2,"limit":20,"offset":0}
+```
+
+Optional filters: `type` (`ORDER_RECEIVED`, `ORDER_CONFIRMED`, `ORDER_CANCELLED`,
+`PAYMENT_REFUNDED`), `limit` (1–100, default 20) and `offset`. One notification:
+`curl -s localhost:8000/notifications/<notificationId>` (404 if unknown).
+
 ### PowerShell (Windows)
 
 In Windows PowerShell, `curl` is an alias for `Invoke-WebRequest`, so use `Invoke-RestMethod`:
@@ -166,6 +198,10 @@ $r.orderId
 # Read it back
 $q = @{ query = "{ order(orderId: `"$($r.orderId)`") { orderId status totalAmount cancellationReason items { productId quantity } } }" } | ConvertTo-Json
 (Invoke-RestMethod -Method Post -Uri http://localhost:3000/graphql -ContentType 'application/json' -Body $q).data.order | Format-List
+
+# Read its notifications, then all of the customer's
+(Invoke-RestMethod "http://localhost:8000/notifications?orderId=$($r.orderId)").items | Format-Table type, message
+(Invoke-RestMethod 'http://localhost:8000/notifications?customerId=3fa85f64-5717-4562-b3fc-2c963f66afa6').items | Format-Table orderId, type, createdAt
 ```
 
 For the other scenarios, change `items` as in the table below, for example
@@ -174,7 +210,8 @@ For the other scenarios, change `items` as in the table below, for example
 ### Postman
 
 `POST http://localhost:3000/orders` with a raw JSON body as above, then
-`POST http://localhost:3000/graphql` with body type GraphQL and the same query.
+`POST http://localhost:3000/graphql` with body type GraphQL and the same query, then
+`GET http://localhost:8000/notifications?orderId=<id>`.
 
 ### Expected results
 
@@ -185,12 +222,26 @@ For the other scenarios, change `items` as in the table below, for example
 | Stock rejection | `SKU-005` × 1 at 9.99 (or more units than available, e.g. `SKU-004` × 6) | `CANCELLED`, `stock rejected: insufficient stock` | Payment `Processed`, then `Refunded` |
 | Unknown product | `SKU-999` × 1 at 9.99 | `CANCELLED`, `stock rejected: unknown product` | Payment `Processed`, then `Refunded` |
 
+Notifications each scenario produces (`GET /notifications?orderId=<id>`). They are listed here in
+the order they are recorded; the API returns them newest first.
+
+| Scenario | Notifications (`type`: `message`) |
+|---|---|
+| Happy path | `ORDER_RECEIVED`: `Your order <id> for 39.98 was received.`<br>`ORDER_CONFIRMED`: `Your order <id> was confirmed.` |
+| Payment failure | `ORDER_RECEIVED`: `Your order <id> for 15000.00 was received.`<br>`ORDER_CANCELLED`: `Your order <id> was cancelled: payment failed: Amount 15000 USD exceeds the maximum allowed threshold of 10000.00 USD.`<br>No refund: nothing was charged. |
+| Stock rejection | `ORDER_RECEIVED`: `Your order <id> for 9.99 was received.`<br>`ORDER_CANCELLED`: `Your order <id> was cancelled: stock rejected: insufficient stock.`<br>`PAYMENT_REFUNDED`: `Your payment of 9.99 USD for order <id> was refunded.` |
+| Unknown product | `ORDER_RECEIVED`: `Your order <id> for 9.99 was received.`<br>`ORDER_CANCELLED`: `Your order <id> was cancelled: stock rejected: unknown product.`<br>`PAYMENT_REFUNDED`: `Your payment of 9.99 USD for order <id> was refunded.` |
+
+Every notification has `channel` `email` and `status` `SENT`. Sending is simulated: Notifications
+stores and logs it, and no email leaves the machine.
+
 To watch the events, start with `--profile tools` and open Kafka UI → Topics. To check the
 databases directly:
 
 ```bash
 docker compose exec postgres-inventory psql -U inventory_user -d inventory -c "select * from stock_items order by 1"
 docker compose exec postgres-payments psql -U payments_user -d payments -c 'select "OrderId","Status","Amount" from payments'
+docker compose exec mongo mongosh -u mongo_user -p mongo_pass --authenticationDatabase admin notifications --eval 'db.notifications.find({}, {type: 1, orderId: 1, _id: 0})'
 ```
 
 ## Reset
@@ -225,3 +276,19 @@ rows alone.
 - **Topic missing or `UNKNOWN_TOPIC_OR_PARTITION`**: re-run `docker compose up kafka-init`; it only
   creates what is missing.
 - **Stale schema or data after switching branches in a service repo**: reset with `down -v`.
+- **No notifications for an order**: run `curl localhost:8000/health/ready`. It answers 503 when
+  MongoDB is unreachable, and `"kafka"` should be `CONNECTED` (`CONNECTING` or `DISCONNECTED`
+  means the consumer is still retrying Kafka; the API keeps answering meanwhile). Then
+  `docker compose logs -f notifications`: each recorded notification logs a line on
+  `notifications.send`.
+- **A message Notifications could not process**: invalid messages, and messages that still fail
+  after the retries, are stored with the reason in the `inbound_dead_letters` collection:
+  `docker compose exec mongo mongosh -u mongo_user -p mongo_pass --authenticationDatabase admin notifications --eval 'db.inbound_dead_letters.find()'`.
+  A refund whose order placement was never received is dead-lettered with
+  `errorType: "OrderContextNotFoundError"` and is not recorded later.
+- **Browser call to Notifications blocked by CORS**: the page's origin is not in
+  `CORS_ALLOWED_ORIGINS` (default `http://localhost:5173`). Set it in the host environment and
+  recreate the container with `docker compose --profile apps up -d notifications`.
+- **`port is already allocated` on 9092 or 8000**: often another project's Kafka container, or a
+  Notifications dev server (`uvicorn --port 8000`) still running from the IDE. `docker ps` and
+  `netstat -ano | findstr :8000` show the owner.

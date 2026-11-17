@@ -116,6 +116,23 @@ services:
       timeout: 5s
       retries: 10
 
+  postgres-identity:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: identity
+      POSTGRES_USER: identity_user
+      POSTGRES_PASSWORD: identity_pass
+    ports:
+      - "5435:5432"
+    volumes:
+      - identity-pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U identity_user -d identity"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
   # ---------------------------------------------------------------- MongoDB (document stores)
   # Orders read model (CQRS projection) and Notifications log.
   mongo:
@@ -282,4 +299,5 @@ volumes:
   orders-pg-data:
   inventory-pg-data:
   payments-pg-data:
+  identity-pg-data:
   mongo-data:

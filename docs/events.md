@@ -172,7 +172,18 @@ Orders ── OrderPlaced ──┬─► Payments  ── PaymentProcessed / Pa
                                           ▼
                        Payments refunds a Processed payment (PaymentRefunded)
                        Inventory releases a Reserved stock   (StockReleased)
+
+Notifications listens alongside the saga and never takes part in it (it publishes nothing):
+  OrderPlaced     → ORDER_RECEIVED      OrderCancelled  → ORDER_CANCELLED
+  OrderConfirmed  → ORDER_CONFIRMED     PaymentRefunded → PAYMENT_REFUNDED
 ```
+
+Notifications (implemented) consumes `orders.order-placed`, `orders.order-confirmed`,
+`orders.order-cancelled` and `payments.payment-refunded` in the consumer group
+`notifications-service` and records one notification per event (idempotent by `eventId`). A
+confirmed order therefore produces `ORDER_RECEIVED` and `ORDER_CONFIRMED`; a cancelled order
+produces `ORDER_RECEIVED` and `ORDER_CANCELLED`, plus `PAYMENT_REFUNDED` when its payment had been
+processed and is refunded. It does not consume `inventory.stock-released`.
 
 How Orders joins the two outcomes (Orders US-09):
 
@@ -189,3 +200,73 @@ Cancellation before placement: the two Orders topics are separate, so Inventory 
 `OrderCancelled` before `OrderPlaced` for the same order. Inventory then records the cancellation and
 ignores the later `OrderPlaced` (nothing is reserved and nothing is published for it), so stock is
 never held for an order that is already cancelled.
+
+## Notifications read API
+
+Notifications publishes no events. What it recorded is read over a read-only HTTP API (port 8000;
+no authentication, local and demo use only; other methods answer 405). OpenAPI at
+`/openapi.json`, interactive docs at `/docs`. Source of truth:
+[`ecommerce-notifications`](../../ecommerce-notifications/README.md).
+
+| Endpoint | Purpose | Status |
+|---|---|---|
+| `GET /notifications` | List notifications, newest first, filtered and paged. | implemented |
+| `GET /notifications/{id}` | One notification; 404 when no notification has this id. | implemented |
+| `GET /health/live`, `GET /health/ready` | Liveness; readiness (200 when MongoDB answers, 503 otherwise; reports the Kafka consumer state without failing on it). | implemented |
+
+### `GET /notifications`
+
+| Query parameter | Type | Default | Rule |
+|---|---|---|---|
+| `customerId` | UUID | | optional filter |
+| `orderId` | UUID | | optional filter |
+| `type` | notification type (see below) | | optional filter |
+| `limit` | integer | 20 | 1 to 100 |
+| `offset` | integer | 0 | 0 or more |
+
+Filters combine with AND. Items are ordered newest first: `createdAt` descending, then `id`
+descending, so paging an unchanged data set never skips or repeats one. Response:
+
+```json
+{
+  "items": [ { "id": "…", "customerId": "…", "orderId": "…", "type": "ORDER_CONFIRMED", "…": "…" } ],
+  "total": 1,
+  "limit": 20,
+  "offset": 0
+}
+```
+
+`total` is the exact number of matching notifications across all pages; `limit` and `offset` are
+the values applied.
+
+### `GET /notifications/{id}`
+
+Returns one notification (the same shape as an `items` element). An unknown id answers 404 with
+`{"detail": "notification <id> not found"}`.
+
+Errors use FastAPI's standard body: 422 for an unknown `type`, an out-of-range or non-integer
+`limit` / `offset`, or a malformed UUID; 503 `{"detail": "database unavailable"}` when MongoDB is
+unreachable (never reported as an empty result).
+
+### Notification fields
+
+| Field | Type | Notes |
+|---|---|---|
+| `id` | UUID | Notification id. |
+| `customerId` | UUID | The customer it is for. |
+| `orderId` | UUID | The order it is about. |
+| `type` | string | One of the types below. |
+| `channel` | string | Always `email` (sending is simulated: stored and logged, no real provider). |
+| `message` | string | Text for the customer. |
+| `status` | string | Always `SENT`. |
+| `createdAt` | ISO 8601 timestamp, UTC | When it was recorded. |
+| `sourceEventId` | UUID | `eventId` of the event that produced it; unique, so a redelivered event adds nothing. |
+
+### Notification types
+
+| Type | Produced by | Message | Status |
+|---|---|---|---|
+| `ORDER_RECEIVED` | `orders.order-placed` | `Your order <orderId> for <totalAmount> was received.` | implemented |
+| `ORDER_CONFIRMED` | `orders.order-confirmed` | `Your order <orderId> was confirmed.` | implemented |
+| `ORDER_CANCELLED` | `orders.order-cancelled` | `Your order <orderId> was cancelled: <reason>.`, or `Your order <orderId> was cancelled.` without a reason | implemented |
+| `PAYMENT_REFUNDED` | `payments.payment-refunded` | `Your payment of <amount> <currency> for order <orderId> was refunded.` (customer from the order's `orders.order-placed`) | implemented |

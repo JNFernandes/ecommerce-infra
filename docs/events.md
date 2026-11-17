@@ -37,6 +37,7 @@ Rules that apply to every service:
 | `inventory.stock-reserved` | Inventory | Orders | implemented |
 | `inventory.stock-rejected` | Inventory | Orders | implemented |
 | `inventory.stock-released` | Inventory | Notifications (optional) | implemented (published), planned (consumer) |
+| `identity.user-registered` | Identity | Orders | implemented (published), planned (consumer) |
 
 ## Orders events
 
@@ -157,6 +158,23 @@ was actually given back: cancelling a rejected or already released order publish
 | `orderId` | UUID | |
 | `items` | array | The consolidated reserved quantities, one per product, sorted by `productId`: `{ "productId": string, "quantity": integer }` |
 | `releasedAt` | timestamp | |
+
+## Identity events
+
+### `identity.user-registered`
+
+Published after a customer account is saved (`POST /auth/register` on Identity). `aggregateId` is
+the user id. Only customers raise it; admins come from the Identity startup seed and raise nothing.
+A failed publish is dead-lettered by Identity and redelivered with the same `eventId`.
+
+| Field | Type | Notes |
+|---|---|---|
+| `customerId` | UUID | New customer id, different from the user id (`aggregateId`). |
+| `email` | string | Normalized: trimmed, lowercase. |
+| `name` | string | Trimmed, 1 to 100 characters. |
+
+No other fields (besides the envelope). Orders uses it to create the customer record. Source of
+truth: [`ecommerce-identity`](../../ecommerce-identity/README.md).
 
 ## Order saga
 

@@ -183,7 +183,8 @@ curl -s -D - -o /dev/null -H 'Origin: http://localhost:5173' localhost:8081/prod
 Created by `kafka-init` with 3 partitions and replication factor 1 (auto-creation is off):
 `orders.order-placed`, `orders.order-confirmed`, `orders.order-cancelled`,
 `payments.payment-processed`, `payments.payment-failed`, `payments.payment-refunded`,
-`inventory.stock-reserved`, `inventory.stock-rejected`, `inventory.stock-released`.
+`inventory.stock-reserved`, `inventory.stock-rejected`, `inventory.stock-released`,
+`identity.user-registered`.
 
 ## Demo scenarios
 

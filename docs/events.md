@@ -166,6 +166,9 @@ was actually given back: cancelling a rejected or already released order publish
 Published after a customer account is saved (`POST /auth/register` on Identity). `aggregateId` is
 the user id. Only customers raise it; admins come from the Identity startup seed and raise nothing.
 A failed publish is dead-lettered by Identity and redelivered with the same `eventId`.
+Redelivery (Identity's outbound retry worker, US-08) sends the stored key and payload unchanged
+(field order may differ), so delivery is at-least-once: consumers MUST deduplicate on `eventId`.
+The schema does not change.
 
 | Field | Type | Notes |
 |---|---|---|

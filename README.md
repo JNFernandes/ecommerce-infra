@@ -63,11 +63,11 @@ payloads, the saga and the Notifications read API are specified in [docs/events.
   └── ecommerce-notifications/
   ```
 
-- Free host ports: 3000, 5432, 5433, 5434, 8000, 8080 (only with `tools`), 8081, 9092, 27017.
+- Free host ports: 3000, 5432, 5433, 5434, 5435, 8000, 8080 (only with `tools`), 8081, 9092, 27017.
 
 ## Run
 
-Infrastructure only (Kafka, the three Postgres databases, MongoDB), for running the services from
+Infrastructure only (Kafka, the four Postgres databases, MongoDB), for running the services from
 your IDE against `localhost`:
 
 ```bash
@@ -123,6 +123,7 @@ and the internal port.
 | Postgres Orders | `localhost:5432` | `postgres-orders:5432` | `orders` | `orders_user` / `orders_pass` |
 | Postgres Inventory | `localhost:5433` | `postgres-inventory:5432` | `inventory` | `inventory_user` / `inventory_pass` |
 | Postgres Payments | `localhost:5434` | `postgres-payments:5432` | `payments` | `payments_user` / `payments_pass` |
+| Postgres Identity | `localhost:5435` | `postgres-identity:5432` | `identity` | `identity_user` / `identity_pass` |
 | MongoDB | `localhost:27017` | `mongo:27017` | `orders_read` (Orders read model), `notifications` (Notifications) | `mongo_user` / `mongo_pass`, auth database `admin` |
 
 These credentials are for local development only. Notifications consumes in the Kafka group

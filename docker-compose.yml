@@ -45,7 +45,8 @@ services:
       - |
         for t in orders.order-placed orders.order-confirmed orders.order-cancelled \
                  payments.payment-processed payments.payment-failed payments.payment-refunded \
-                 inventory.stock-reserved inventory.stock-rejected inventory.stock-released; do
+                 inventory.stock-reserved inventory.stock-rejected inventory.stock-released \
+                 identity.user-registered; do
           kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists \
             --topic "$$t" --partitions 3 --replication-factor 1
         done

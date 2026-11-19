@@ -11,6 +11,7 @@ the services from their sibling repositories.
 | Payments | `../ecommerce-payments` | .NET worker, EF Core | Charges each placed order (fails above 10 000.00), refunds cancelled orders |
 | Inventory | `../ecommerce-inventory` | Spring Boot, Flyway | Reserves stock for each placed order, releases it when the order is cancelled; read-only products API |
 | Notifications | `../ecommerce-notifications` | Python, FastAPI, MongoDB | Records a customer notification for each order event (sending is simulated); read-only HTTP API |
+| Identity | `../ecommerce-identity` | NestJS, TypeORM | Users, credentials and sessions; issues the RS256 JWTs (JWKS at `/.well-known/jwks.json`); publishes `identity.user-registered` |
 
 ## Architecture
 
@@ -60,10 +61,32 @@ payloads, the saga and the Notifications read API are specified in [docs/events.
   ├── ecommerce-orders/
   ├── ecommerce-payments/
   ├── ecommerce-inventory/
-  └── ecommerce-notifications/
+  ├── ecommerce-notifications/
+  └── ecommerce-identity/
   ```
 
-- Free host ports: 3000, 5432, 5433, 5434, 5435, 8000, 8080 (only with `tools`), 8081, 9092, 27017.
+- For Identity: Node.js 20+ on the host, once, to generate its signing key (see [First run](#first-run)).
+- Free host ports: 3000, 3001, 5432, 5433, 5434, 5435, 8000, 8080 (only with `tools`), 8081, 9092, 27017.
+
+## First run
+
+Identity signs its tokens with an RS256 private key that is never built into the image nor
+committed. Generate it once, in the Identity repository (`keys/` is git-ignored there):
+
+```bash
+cd ../ecommerce-identity
+npm ci
+npm run keys:generate      # writes keys/private.pem and keys/public.pem
+cd ../ecommerce-infra
+docker compose --profile apps up -d --build
+```
+
+Compose mounts `../ecommerce-identity/keys` read-only at `/run/keys` in the container
+(`JWT_PRIVATE_KEY_PATH=/run/keys/private.pem`). Without the key the `identity` container exits on
+startup and keeps restarting.
+
+To also create an administrator, set the admin variables in the host environment before `up` (see
+[Identity admin](#identity-admin)).
 
 ## Run
 
@@ -82,7 +105,7 @@ docker compose --profile apps up -d --build
 
 Add `--profile tools` to either command to also start Kafka UI on http://localhost:8080.
 
-`docker compose --profile apps ps` should show `orders`, `inventory` and `notifications` as `healthy`,
+`docker compose --profile apps ps` should show `orders`, `inventory`, `notifications` and `identity` as `healthy`,
 `payments` as `Up` (it has no HTTP endpoint). Add `-a` to also see `kafka-init` and `orders-seed`,
 which should both be `Exited (0)`.
 
@@ -92,12 +115,15 @@ What happens on start:
 2. `kafka-init` creates the topics (idempotent) and exits.
 3. The services start once their database and Kafka are healthy and `kafka-init` has finished.
    They restart on failure, so a service that loses Kafka at startup recovers.
-4. Each service migrates its own schema on startup: Orders with TypeORM, Payments with EF Core,
-   Inventory with Flyway. Notifications creates its MongoDB indexes (database `notifications`).
+4. Each service migrates its own schema on startup: Orders and Identity with TypeORM, Payments
+   with EF Core, Inventory with Flyway. Notifications creates its MongoDB indexes (database
+   `notifications`).
 5. Demo data is loaded, idempotently (existing rows are never changed):
    - Orders: customer `3fa85f64-5717-4562-b3fc-2c963f66afa6`, by the one-shot `orders-seed`
      container (the `seed:customers` script), which runs once Orders is healthy and then exits.
    - Inventory: the sample stock below (Spring profile `local`, `db/local/R__seed_local_stock.sql`).
+   - Identity: one `ADMIN`, only when none exists and `ADMIN_EMAIL` / `ADMIN_PASSWORD` are set
+     (see [Identity admin](#identity-admin)).
 
 | Product | Available |
 |---|---|
@@ -117,6 +143,7 @@ and the internal port.
 | Orders (REST, GraphQL at `/graphql`, Swagger at `/api`) | `localhost:3000` | `orders:3000` | | |
 | Inventory (products API, Swagger UI at `/swagger-ui.html`, health at `/actuator/health`) | `localhost:8081` | `inventory:8081` | | |
 | Notifications (read API, docs at `/docs`, health at `/health/ready`) | `localhost:8000` | `notifications:8000` | | |
+| Identity (auth API, Swagger UI at `/docs`, health at `/health`, JWKS at `/.well-known/jwks.json`) | `localhost:3001` | `identity:3001` | | |
 | Payments | not published | | | |
 | Kafka | `localhost:9092` | `kafka:29092` | | |
 | Kafka UI (`tools` profile) | `localhost:8080` | | | |
@@ -129,10 +156,41 @@ and the internal port.
 These credentials are for local development only. Notifications consumes in the Kafka group
 `notifications-service`.
 
+### Identity admin
+
+At startup Identity creates one `ADMIN` when no admin exists yet and both `ADMIN_EMAIL` and
+`ADMIN_PASSWORD` are set. Compose passes these three variables through from the host environment,
+with no default password; when they are unset no admin is created (Identity logs a warning) and
+everything else works. Existing users are never changed or promoted.
+
+| Variable | Required | Notes |
+|---|---|---|
+| `ADMIN_EMAIL` | for the seed | Same rules as registration (trimmed, lowercased). |
+| `ADMIN_PASSWORD` | for the seed | 10–128 characters, not equal to the email. Never logged. Not needed after the first start. |
+| `ADMIN_NAME` | no | Display name, default `Administrator`. |
+
+```bash
+ADMIN_EMAIL=admin@example.com ADMIN_PASSWORD='choose-a-long-password' \
+  docker compose --profile apps up -d --build
+```
+
+```powershell
+$env:ADMIN_EMAIL = 'admin@example.com'
+$env:ADMIN_PASSWORD = 'choose-a-long-password'
+docker compose --profile apps up -d --build
+Remove-Item Env:ADMIN_PASSWORD
+```
+
+The seed runs only while no admin exists, so after a reset (`down -v`) set the variables again.
+
+Compose also sets `JWT_ISSUER=http://localhost:3001` and `JWT_AUDIENCE=ecommerce`, the values
+other services must expect when they verify Identity's tokens.
+
 ## HTTP APIs
 
-Three services have an HTTP API for clients such as a browser frontend. They have no
-authentication and are meant for local and demo use. Services never call each other over HTTP:
+Four services have an HTTP API for clients such as a browser frontend. Orders, Inventory and
+Notifications have no authentication yet and are meant for local and demo use; Identity issues the
+tokens. Services never call each other over HTTP:
 Kafka events remain the only service-to-service communication (see
 [docs/events.md](docs/events.md#http-apis)).
 
@@ -141,6 +199,7 @@ Kafka events remain the only service-to-service communication (see
 | Orders `localhost:3000` | `POST /orders`, `POST /orders/{orderId}/cancel`, `POST /orders/{orderId}/confirm`; GraphQL `POST /graphql` with the queries `order(orderId)` and `orders(status, customerId, limit, offset)` | Swagger UI at http://localhost:3000/api |
 | Inventory `localhost:8081` | `GET /products?limit=&offset=`, `GET /products/{id}` (404 if unknown), `GET /actuator/health` | Swagger UI at http://localhost:8081/swagger-ui.html, OpenAPI at `/v3/api-docs` |
 | Notifications `localhost:8000` | `GET /notifications?customerId=&orderId=&type=&limit=&offset=`, `GET /notifications/{id}` (404 if unknown), `GET /health/live`, `GET /health/ready` | http://localhost:8000/docs, OpenAPI at `/openapi.json` |
+| Identity `localhost:3001` | `POST /auth/register`, `POST /auth/login`, `POST /auth/refresh`, `POST /auth/logout`, `GET /users/me`, the admin `/users` endpoints, `GET /.well-known/jwks.json`, `GET /health` (full list in the Identity README) | Swagger UI at http://localhost:3001/docs |
 
 ```bash
 # Orders: place an order, then read orders through GraphQL
@@ -157,10 +216,36 @@ curl -s localhost:8081/products/SKU-003
 curl -s "localhost:8000/notifications?customerId=3fa85f64-5717-4562-b3fc-2c963f66afa6"
 ```
 
+Identity: register a customer, log in, then call a protected route with the access token:
+
+```bash
+curl -s -X POST localhost:3001/auth/register -H 'content-type: application/json' \
+  -d '{"email":"jane@example.com","name":"Jane Doe","password":"a-long-password-1"}'
+# → 201 {"id":"…","customerId":"…","email":"jane@example.com","name":"Jane Doe","roles":["CUSTOMER"],"createdAt":"…"}
+
+curl -s -X POST localhost:3001/auth/login -H 'content-type: application/json' \
+  -d '{"email":"jane@example.com","password":"a-long-password-1"}'
+# → 200 {"accessToken":"…","refreshToken":"…","tokenType":"Bearer","expiresIn":900}
+
+curl -s localhost:3001/users/me -H 'Authorization: Bearer <accessToken>'
+```
+
+```powershell
+$cred = @{ email = 'jane@example.com'; password = 'a-long-password-1' }
+Invoke-RestMethod -Method Post -Uri http://localhost:3001/auth/register -ContentType 'application/json' `
+  -Body (@{ email = $cred.email; name = 'Jane Doe'; password = $cred.password } | ConvertTo-Json)
+$t = Invoke-RestMethod -Method Post -Uri http://localhost:3001/auth/login -ContentType 'application/json' -Body ($cred | ConvertTo-Json)
+Invoke-RestMethod http://localhost:3001/users/me -Headers @{ Authorization = "Bearer $($t.accessToken)" }
+```
+
+Registration publishes `identity.user-registered` (key: the user id). With `--profile tools` it
+shows in Kafka UI → Topics → `identity.user-registered` → Messages. Registration is rate limited
+to 5 per minute per client IP, and login to 10 per minute per IP and per email.
+
 ### CORS
 
-All three APIs read the same variable, `CORS_ALLOWED_ORIGINS` (comma-separated exact origins).
-The compose file defaults it to `http://localhost:5173`, a frontend dev server, for all three. To
+All four APIs read the same variable, `CORS_ALLOWED_ORIGINS` (comma-separated exact origins).
+The compose file defaults it to `http://localhost:5173`, a frontend dev server, for all four. To
 change it, set it in the host environment before `up`; the value applies to every service:
 
 ```bash
@@ -172,8 +257,8 @@ $env:CORS_ALLOWED_ORIGINS = 'http://localhost:5173,http://localhost:4200'
 docker compose --profile apps up -d
 ```
 
-Allowed methods: Orders `GET`, `POST` (and preflight `OPTIONS`); Inventory and Notifications `GET`
-only. Any other origin gets no CORS headers, so the browser blocks the call. Check it with:
+Allowed methods: Orders `GET`, `POST` (and preflight `OPTIONS`); Identity `GET`, `POST`, `PATCH`
+(and `OPTIONS`), with the `Authorization` header; Inventory and Notifications `GET` only. Any other origin gets no CORS headers, so the browser blocks the call. Check it with:
 
 ```bash
 curl -s -D - -o /dev/null -H 'Origin: http://localhost:5173' localhost:8081/products | grep -i access-control
@@ -324,6 +409,11 @@ rows alone.
 - **Topic missing or `UNKNOWN_TOPIC_OR_PARTITION`**: re-run `docker compose up kafka-init`; it only
   creates what is missing.
 - **Stale schema or data after switching branches in a service repo**: reset with `down -v`.
+- **`identity` keeps restarting**: `docker compose logs identity`. Usually the signing key is
+  missing: run `npm run keys:generate` in `../ecommerce-identity` (see [First run](#first-run)).
+  An invalid `ADMIN_EMAIL` / `ADMIN_PASSWORD` also stops startup, with a message naming the
+  variable. On a Linux host the key is written with mode 0600, so it must be readable by uid 1000
+  (the image's `node` user); Docker Desktop on Windows and macOS is not affected.
 - **No notifications for an order**: run `curl localhost:8000/health/ready`. It answers 503 when
   MongoDB is unreachable, and `"kafka"` should be `CONNECTED` (`CONNECTING` or `DISCONNECTED`
   means the consumer is still retrying Kafka; the API keeps answering meanwhile). Then
@@ -337,7 +427,7 @@ rows alone.
 - **Browser call blocked by CORS**: the page's origin is not in `CORS_ALLOWED_ORIGINS` (default
   `http://localhost:5173`). Set it in the host environment and recreate the containers with
   `docker compose --profile apps up -d` (see [CORS](#cors)).
-- **`port is already allocated` on 9092, 8000 or 8081**: often another project's Kafka
-  container, or a Notifications (`uvicorn --port 8000`) or Inventory (Spring Boot, 8081) dev
-  server still running from the IDE. `docker ps` and
+- **`port is already allocated` on 9092, 8000, 8081 or 3001**: often another project's Kafka
+  container, or a Notifications (`uvicorn --port 8000`), Inventory (Spring Boot, 8081) or Identity
+  (`npm run start:dev`, 3001) dev server still running from the IDE. `docker ps` and
   `netstat -ano | findstr :8000` show the owner.

@@ -164,9 +164,11 @@ was actually given back: cancelling a rejected or already released order publish
 ### `identity.user-registered`
 
 Published after a customer account is saved on Identity: by registration (`POST /auth/register`) or
-when an admin creates a customer (`POST /users` with `["CUSTOMER"]`, US-09); the payload is the
-same in both cases. `aggregateId` is the user id. Only customers raise it; admins (from the startup
-seed or created through `POST /users`) raise nothing.
+when an admin creates a customer (`POST /users` with `["CUSTOMER"]`, US-09), or when an admin first
+grants `CUSTOMER` to a user without `customerId` (`PUT /users/{id}/roles`, US-10); the payload is
+the same in every case. `aggregateId` is the user id. Only a new customer identity raises it: admins
+(from the startup seed or created through `POST /users`) raise nothing, and re-granting `CUSTOMER`
+reuses the existing `customerId` without a new event.
 A failed publish is dead-lettered by Identity and redelivered with the same `eventId`.
 Redelivery (Identity's outbound retry worker, US-08) sends the stored key and payload unchanged
 (field order may differ), so delivery is at-least-once: consumers MUST deduplicate on `eventId`.

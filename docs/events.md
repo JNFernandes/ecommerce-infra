@@ -37,7 +37,7 @@ Rules that apply to every service:
 | `inventory.stock-reserved` | Inventory | Orders | implemented |
 | `inventory.stock-rejected` | Inventory | Orders | implemented |
 | `inventory.stock-released` | Inventory | Notifications (optional) | implemented (published), planned (consumer) |
-| `identity.user-registered` | Identity | Orders | implemented (published), planned (consumer) |
+| `identity.user-registered` | Identity | Orders | implemented |
 
 ## Orders events
 

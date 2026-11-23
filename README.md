@@ -15,6 +15,7 @@ the services from their sibling repositories.
 | Inventory | `../ecommerce-inventory` | Spring Boot, Flyway | Reserves stock for each placed order, releases it when the order is cancelled; read-only products API |
 | Notifications | `../ecommerce-notifications` | Python, FastAPI, MongoDB | Records a customer notification for each order event (sending is simulated); read-only HTTP API |
 | Identity | `../ecommerce-identity` | NestJS, TypeORM | Users, credentials and sessions; issues the RS256 JWTs (JWKS at `/.well-known/jwks.json`); publishes `identity.user-registered` |
+| AI | `../ecommerce-ai` | Python, FastAPI, PostgreSQL | Planned: MCP tools over the platform APIs, triage of failed orders (`ai.order-triage-completed`), a conversational assistant. Bootstrap today: health and readiness only |
 
 ## Architecture
 
@@ -50,8 +51,10 @@ the services from their sibling repositories.
 An order starts `PENDING`. It becomes `CONFIRMED` when the payment is processed **and** the stock
 is reserved, and `CANCELLED` as soon as either fails. A cancellation makes Payments refund a
 processed payment and Inventory release a reserved stock. Notifications follows the saga without
-taking part in it: it records one notification per order event and publishes nothing. Topics,
-payloads, the saga and the Notifications read API are specified in [docs/events.md](docs/events.md).
+taking part in it: it records one notification per order event and publishes nothing. AI
+(planned) will also follow it from the side, explaining failed orders, and calls the APIs through
+the gateway only with the caller's own token. Topics, payloads, the saga and the Notifications read
+API are specified in [docs/events.md](docs/events.md).
 
 ## Prerequisites
 
@@ -65,11 +68,12 @@ payloads, the saga and the Notifications read API are specified in [docs/events.
   ├── ecommerce-payments/
   ├── ecommerce-inventory/
   ├── ecommerce-notifications/
-  └── ecommerce-identity/
+  ├── ecommerce-identity/
+  └── ecommerce-ai/
   ```
 
 - For Identity: Node.js 20+ on the host, once, to generate its signing key (see [First run](#first-run)).
-- Free host ports: 3000, 3001, 5432, 5433, 5434, 5435, 8000, 8080 (only with `tools`), 8081, 9092, 27017.
+- Free host ports: 3000, 3001, 5432, 5433, 5434, 5435, 5436, 8000, 8002, 8080 (only with `tools`), 8081, 9092, 27017.
 
 ## First run
 
@@ -93,7 +97,7 @@ To also create an administrator, set the admin variables in the host environment
 
 ## Run
 
-Infrastructure only (Kafka, the four Postgres databases, MongoDB), for running the services from
+Infrastructure only (Kafka, the five Postgres databases, MongoDB), for running the services from
 your IDE against `localhost`:
 
 ```bash
@@ -108,7 +112,7 @@ docker compose --profile apps up -d --build
 
 Add `--profile tools` to either command to also start Kafka UI on http://localhost:8080.
 
-`docker compose --profile apps ps` should show `orders`, `inventory`, `notifications` and `identity` as `healthy`,
+`docker compose --profile apps ps` should show `orders`, `inventory`, `notifications`, `identity` and `ai` as `healthy`,
 `payments` and `gateway` as `Up` (no healthcheck). Add `-a` to also see `kafka-init` and `orders-seed`,
 which should both be `Exited (0)`.
 
@@ -120,7 +124,7 @@ What happens on start:
    They restart on failure, so a service that loses Kafka at startup recovers.
 4. Each service migrates its own schema on startup: Orders and Identity with TypeORM, Payments
    with EF Core, Inventory with Flyway. Notifications creates its MongoDB indexes (database
-   `notifications`).
+   `notifications`). AI has no schema yet; it starts without Kafka, PostgreSQL or an LLM key.
 5. Demo data is loaded, idempotently (existing rows are never changed):
    - Orders: customer `3fa85f64-5717-4562-b3fc-2c963f66afa6`, by the one-shot `orders-seed`
      container (the `seed:customers` script), which runs once Orders is healthy and then exits.
@@ -148,6 +152,7 @@ and the internal port.
 | Inventory (products API, Swagger UI at `/swagger-ui.html`, health at `/actuator/health`) | via gateway `/api/inventory/products` | `inventory:8081` | | |
 | Notifications (read API, docs at `/docs`, health at `/health/ready`) | via gateway `/api/notifications` | `notifications:8000` | | |
 | Identity (auth API, Swagger UI at `/docs`, health at `/health`, JWKS at `/.well-known/jwks.json`) | via gateway `/api/identity/...` | `identity:3001` | | |
+| AI (docs at `/docs`, health at `/health`, readiness at `/ready`) | no gateway route yet | `ai:8002` | | |
 | Payments | not published | | | |
 | Kafka | `localhost:9092` | `kafka:29092` | | |
 | Kafka UI (`tools` profile) | `localhost:8080` | | | |
@@ -155,10 +160,11 @@ and the internal port.
 | Postgres Inventory | `localhost:5433` | `postgres-inventory:5432` | `inventory` | `inventory_user` / `inventory_pass` |
 | Postgres Payments | `localhost:5434` | `postgres-payments:5432` | `payments` | `payments_user` / `payments_pass` |
 | Postgres Identity | `localhost:5435` | `postgres-identity:5432` | `identity` | `identity_user` / `identity_pass` |
+| Postgres AI | `localhost:5436` | `postgres-ai:5432` | `ecommerce_ai` | `ai_user` / `ai_pass` |
 | MongoDB | `localhost:27017` | `mongo:27017` | `orders_read` (Orders read model), `notifications` (Notifications) | `mongo_user` / `mongo_pass`, auth database `admin` |
 
-With `docker-compose.dev.yml` the four services are also published on the internal port
-(`localhost:3000`, `3001`, `8000`, `8081`). These credentials are for local development only.
+With `docker-compose.dev.yml` the five HTTP services are also published on the internal port
+(`localhost:3000`, `3001`, `8000`, `8002`, `8081`). These credentials are for local development only.
 Notifications consumes in the Kafka group
 `notifications-service`.
 
@@ -255,12 +261,12 @@ Created by `kafka-init` with 3 partitions and replication factor 1 (auto-creatio
 `orders.order-placed`, `orders.order-confirmed`, `orders.order-cancelled`,
 `payments.payment-processed`, `payments.payment-failed`, `payments.payment-refunded`,
 `inventory.stock-reserved`, `inventory.stock-rejected`, `inventory.stock-released`,
-`identity.user-registered`.
+`identity.user-registered`, `ai.order-triage-completed` (planned publisher: AI).
 
 ## API gateway
 
 With `--profile apps`, a Traefik gateway is the only published entry to the application APIs:
-**http://localhost:8090/api/...**. Orders, Identity, Inventory and Notifications publish no host
+**http://localhost:8090/api/...**. Orders, Identity, Inventory, Notifications and AI publish no host
 port (the databases, Kafka and MongoDB keep theirs for the infra-only workflow). Configuration
 only, in [`gateway/`](gateway) (mounted read-only): `traefik.yml` (static) and
 `dynamic/routes.yml` (routes, middlewares). Traefik uses the file provider only: the Docker socket
@@ -277,6 +283,9 @@ is not mounted, and the dashboard and API are off.
 | `/api/graphql` | `orders:3000` | `/graphql` | read model |
 | `/api/inventory/products[/...]` | `inventory:8081` | `/products[/...]` | public catalog |
 | `/api/notifications[/...]` | `notifications:8000` | `/notifications[/...]` | |
+
+AI has no route yet: it is added with its first API (the assistant or the MCP endpoint). Its
+SSE streams will need a longer write timeout than the entrypoint's 30 s.
 
 Everything else answers `404` at the gateway: JWKS (`/.well-known/jwks.json`, which Orders and
 Notifications fetch over the internal network), Swagger UIs and OpenAPI documents, `/health*`,
@@ -301,7 +310,7 @@ Timeouts: 30 s to read a request and to write a response, 60 s idle keep-alive (
 
 ### Direct access for debugging
 
-`docker-compose.dev.yml` publishes the services' ports again (`3000`, `3001`, `8000`, `8081`) and
+`docker-compose.dev.yml` publishes the services' ports again (`3000`, `3001`, `8000`, `8002`, `8081`) and
 sets their own `CORS_ALLOWED_ORIGINS` to `http://localhost:5173`. The gateway keeps working
 alongside:
 
@@ -323,6 +332,7 @@ docker compose --profile apps --profile gateway-debug up -d
 | http://127.0.0.1:9001/docs | Identity Swagger UI |
 | http://127.0.0.1:9081/swagger-ui/index.html | Inventory Swagger UI |
 | http://127.0.0.1:9080/docs | Notifications docs |
+| http://127.0.0.1:9002/docs | AI docs |
 
 These serve the documentation only; "Try it out" calls are not routed there. Use the gateway URLs
 instead, or the dev override.

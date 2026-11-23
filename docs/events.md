@@ -1,6 +1,6 @@
 # Event contracts
 
-Every service talks to the others only through Kafka events. This file is the single reference for the topics, who publishes and consumes them, and the JSON each message carries. When a service changes an event, update this file in the same change.
+Every service talks to the others only through Kafka events (the HTTP exceptions are listed under [HTTP APIs](#http-apis)). This file is the single reference for the topics, who publishes and consumes them, and the JSON each message carries. When a service changes an event, update this file in the same change.
 
 Status: **implemented** means the code exists today. **planned** means the contract is agreed but not built yet.
 
@@ -30,14 +30,15 @@ Rules that apply to every service:
 |---|---|---|---|
 | `orders.order-placed` | Orders | Payments, Inventory, Notifications | implemented |
 | `orders.order-confirmed` | Orders | Notifications | implemented |
-| `orders.order-cancelled` | Orders | Payments, Inventory, Notifications | implemented |
+| `orders.order-cancelled` | Orders | Payments, Inventory, Notifications, AI | implemented (AI consumer planned) |
 | `payments.payment-processed` | Payments | Orders | implemented |
-| `payments.payment-failed` | Payments | Orders | implemented |
+| `payments.payment-failed` | Payments | Orders, AI | implemented (AI consumer planned) |
 | `payments.payment-refunded` | Payments | Notifications | implemented |
 | `inventory.stock-reserved` | Inventory | Orders | implemented |
-| `inventory.stock-rejected` | Inventory | Orders | implemented |
+| `inventory.stock-rejected` | Inventory | Orders, AI | implemented (AI consumer planned) |
 | `inventory.stock-released` | Inventory | Notifications (optional) | implemented (published), planned (consumer) |
 | `identity.user-registered` | Identity | Orders | implemented |
+| `ai.order-triage-completed` | AI | none yet | planned |
 
 ## Orders events
 
@@ -183,6 +184,62 @@ The schema does not change.
 No other fields (besides the envelope). Orders uses it to create the customer record. Source of
 truth: [`ecommerce-identity`](../../ecommerce-identity/README.md).
 
+## AI events
+
+### `ai.order-triage-completed`
+
+Published by the triage worker of [`ecommerce-ai`](../../ecommerce-ai/README.md) after it has
+explained why an order failed. **`aggregateId` is the order id** (like Orders events, unlike
+Payments and Inventory events), and it is the Kafka message key.
+
+The worker consumes `orders.order-cancelled`, `payments.payment-failed` and
+`inventory.stock-rejected` (consumer group `ai-triage`) and publishes one result per consumed
+event, idempotently by that event's `eventId`. A failed order therefore usually gets two results:
+one for the failed outcome and one for the cancellation it causes. Each result has its own new
+`eventId`; a republish of the same result keeps it. The result is saved before it is published,
+and a failed publish is dead-lettered and redelivered unchanged, as for every other event.
+
+| Field | Type | Notes |
+|---|---|---|
+| `orderId` | UUID | The order; equal to `aggregateId`. |
+| `cause` | string | One of the causes below. |
+| `explanation` | string | Plain text for an operator, 1 to 1000 characters. Ids only: no names, emails or other personal data. |
+| `suggestedAction` | string | One of the actions below. Advice for a human; the AI never carries it out. |
+| `confidence` | number | From 0 to 1. |
+| `promptVersion` | string | Version of the prompt that produced the result, for example `triage.v1`. |
+| `modelId` | string | The LLM model id, or `template:<name>` when the deterministic fallback produced the result (no model was called). |
+
+`cause`:
+
+| Value | When |
+|---|---|
+| `PAYMENT_FAILED` | `payments.payment-failed`, or a cancellation whose `reason` starts with `payment failed` |
+| `INSUFFICIENT_STOCK` | `inventory.stock-rejected` with `reason` `insufficient stock`, or the matching cancellation |
+| `UNKNOWN_PRODUCT` | `inventory.stock-rejected` with `reason` `unknown product` or `unknown product and insufficient stock`, or the matching cancellation |
+| `CANCELLATION_REQUESTED` | `orders.order-cancelled` without `reason` (requested through the Orders API) |
+| `UNKNOWN` | None of the above can be established from the event |
+
+`suggestedAction`:
+
+| Value | Meaning |
+|---|---|
+| `CONTACT_CUSTOMER` | Tell the customer what happened and how to order again (for example with a payment that passes) |
+| `RESTOCK` | Replenish the products that were short |
+| `FIX_CATALOG` | The order referenced a product the catalog does not know |
+| `REVIEW` | A person should investigate |
+| `NONE` | Nothing to do (for example a cancellation the customer asked for) |
+
+Adding a `cause` or `suggestedAction` value is a schema change: it bumps `version`.
+
+```json
+{
+  "eventId": "6f1c…", "aggregateId": "<orderId>", "occurredAt": "2026-11-23T20:00:00.000Z", "version": 1,
+  "orderId": "<orderId>", "cause": "INSUFFICIENT_STOCK",
+  "explanation": "Stock for product SKU-002 was short by 3 units, so nothing was reserved and the order was cancelled.",
+  "suggestedAction": "RESTOCK", "confidence": 0.92, "promptVersion": "triage.v1", "modelId": "claude-haiku-5-5"
+}
+```
+
 ## Order saga
 
 ```
@@ -201,6 +258,9 @@ Orders ── OrderPlaced ──┬─► Payments  ── PaymentProcessed / Pa
 Notifications listens alongside the saga and never takes part in it (it publishes nothing):
   OrderPlaced     → ORDER_RECEIVED      OrderCancelled  → ORDER_CANCELLED
   OrderConfirmed  → ORDER_CONFIRMED     PaymentRefunded → PAYMENT_REFUNDED
+
+AI (planned) listens to the failures and explains them, without taking part in the saga:
+  PaymentFailed / StockRejected / OrderCancelled → ai.order-triage-completed
 ```
 
 Notifications (implemented) consumes `orders.order-placed`, `orders.order-confirmed`,
@@ -229,10 +289,22 @@ never held for an order that is already cancelled.
 ## HTTP APIs
 
 Kafka events remain the **only** service-to-service communication for business data: no service
-calls another's API. The single exception is authentication: Orders and Notifications fetch
-Identity's public keys (`GET /.well-known/jwks.json`) to verify access tokens locally, lazily on the
-first authenticated request and cached, never per request. The HTTP APIs exist for clients (a
-browser frontend, curl, Postman), not for other services.
+calls another's API to coordinate the saga. There are two documented exceptions:
+
+1. **Authentication.** Orders, Notifications and AI fetch Identity's public keys
+   (`GET /.well-known/jwks.json`) to verify access tokens locally, lazily on the first
+   authenticated request and cached, never per request.
+2. **AI as a client (planned).** `ecommerce-ai` calls the platform APIs through the gateway
+   (`http://gateway:8090/api/...` in the compose network) **as a client on behalf of the caller,
+   with the caller's own access token**, exactly as a browser would. It never uses a service
+   account or an admin token, so it can see and do only what the caller can. Its tools are
+   limited to an allowlist of documented endpoints (the read endpoints plus
+   `POST /orders/{orderId}/cancel`, which needs the caller's explicit approval). The triage worker
+   has no caller and calls no API: it works from event payloads only. See the ecommerce-ai
+   constitution and its ADR 0001.
+
+The HTTP APIs exist for clients (a browser frontend, curl, Postman, the AI assistant), not for
+service-to-service coordination.
 Besides the Orders API (REST to place, cancel and confirm orders; GraphQL read model), they are:
 
 | API | Base URL (local) | Purpose | Status |

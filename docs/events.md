@@ -228,8 +228,11 @@ never held for an order that is already cancelled.
 
 ## HTTP APIs
 
-Kafka events remain the **only** service-to-service communication: no service calls another over
-HTTP. The HTTP APIs exist for clients (a browser frontend, curl, Postman), not for other services.
+Kafka events remain the **only** service-to-service communication for business data: no service
+calls another's API. The single exception is authentication: Orders and Notifications fetch
+Identity's public keys (`GET /.well-known/jwks.json`) to verify access tokens locally, lazily on the
+first authenticated request and cached, never per request. The HTTP APIs exist for clients (a
+browser frontend, curl, Postman), not for other services.
 Besides the Orders API (REST to place, cancel and confirm orders; GraphQL read model), they are:
 
 | API | Base URL (local) | Purpose | Status |
@@ -243,7 +246,9 @@ in `CORS_ALLOWED_ORIGINS` (see the README).
 ## Notifications read API
 
 Notifications publishes no events. What it recorded is read over a read-only HTTP API (port 8000;
-no authentication, local and demo use only; other methods answer 405). OpenAPI at
+requires an Identity access token: a `CUSTOMER` sees only their own notifications, an `ADMIN` sees
+all; 401 without a valid token, 503 while Identity's keys were never fetched; other methods answer
+405). OpenAPI at
 `/openapi.json`, interactive docs at `/docs`. Source of truth:
 [`ecommerce-notifications`](../../ecommerce-notifications/README.md).
 

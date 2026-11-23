@@ -12,7 +12,7 @@ x-jwt:
 services:
   # ---------------------------------------------------------------- Kafka (KRaft, no Zookeeper)
   kafka:
-    image: confluentinc/cp-kafka:7.6.1
+    image: confluentinc/cp-kafka:8.4.1
     restart: unless-stopped
     ports:
       - "9092:9092"
@@ -41,7 +41,7 @@ services:
 
   # Creates every topic explicitly, then exits. Re-running is safe.
   kafka-init:
-    image: confluentinc/cp-kafka:7.6.1
+    image: confluentinc/cp-kafka:8.4.1
     depends_on:
       kafka:
         condition: service_healthy
@@ -159,7 +159,7 @@ services:
   # ---------------------------------------------------------------- MongoDB (document stores)
   # Orders read model (CQRS projection) and Notifications log.
   mongo:
-    image: mongo:7
+    image: mongo:9
     restart: unless-stopped
     environment:
       MONGO_INITDB_ROOT_USERNAME: mongo_user

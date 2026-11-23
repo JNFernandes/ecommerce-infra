@@ -57,8 +57,36 @@ jobs:
         with:
           category: /language:actions
 
+  # The images to scan are read from docker-compose.yml (every profile): each distinct image of a
+  # service that is pulled, not built. New services and Dependabot tag bumps need no edit here.
+  # Built images (ecommerce-*) are scanned in their own repositories.
+  image-list:
+    name: Image list
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      matrix: ${{ steps.list.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: list
+        # enforce: the job fails on fixable HIGH/CRITICAL. Only the gateway (traefik) is enforced:
+        # it is the one component exposed to clients. The others are local-dev infrastructure;
+        # their findings go to the Security tab without failing (threshold in the README).
+        run: |
+          matrix=$(docker compose --profile apps --profile tools --profile gateway-debug config --format json \
+            | jq -c '{include: ([.services[] | select(has("build") | not) | .image] | unique
+                       | map({image: ., enforce: startswith("traefik:")}))}')
+          echo "$matrix" | jq .
+          [ "$(echo "$matrix" | jq '.include | length')" -gt 0 ] || { echo "::error::no image found"; exit 1; }
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+
   images:
     name: Image scan (${{ matrix.image }})
+    needs: image-list
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -66,32 +94,11 @@ jobs:
       security-events: write
     strategy:
       fail-fast: false
-      matrix:
-        # enforce: the job fails on fixable HIGH/CRITICAL. Only the gateway is enforced: it is the
-        # one component exposed to clients, and its tag is ours to bump. The others are local-dev
-        # infrastructure published only on the developer's machine; their findings are reported in
-        # the Security tab without failing (threshold documented in the README).
-        include:
-          - image: traefik:v3.7
-            enforce: true
-          - image: postgres:16-alpine
-            enforce: false
-          - image: mongo:7
-            enforce: false
-          - image: confluentinc/cp-kafka:7.6.1
-            enforce: false
-          - image: provectuslabs/kafka-ui:v0.7.2
-            enforce: false
+      matrix: ${{ fromJSON(needs.image-list.outputs.matrix) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: The image is the one docker-compose.yml runs
-        env:
-          IMAGE: ${{ matrix.image }}
-        run: |
-          docker compose --profile apps --profile tools config --images | grep -qxF "$IMAGE" \
-            || { echo "::error::$IMAGE is not in docker-compose.yml; update the matrix"; exit 1; }
       # 1. Report: SARIF for the Security tab. Never fails, so the upload always happens.
       - name: Trivy (SARIF report)
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0

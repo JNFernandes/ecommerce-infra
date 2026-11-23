@@ -500,7 +500,7 @@ dependency audits) run in their own repositories.
 | Workflow | When | Jobs |
 |---|---|---|
 | [CI](.github/workflows/ci.yml) | pull requests, pushes to `main` | **Compose config**: every file and profile combination validates (the sibling repos are not needed). **Gateway smoke test**: starts the gateway alone and checks the edge rules (JWKS and dashboard not exposed, CORS allow/deny, `413` over 1 MB, security headers, `429` on the auth rate limit). **Workflow lint**: actionlint (with shellcheck). |
-| [Security](.github/workflows/security.yml) | pull requests, pushes to `main`, Mondays 05:17 UTC | **Secrets**: gitleaks over the full history, fails on any finding. **CodeQL** for the workflows (language `actions`). **Image scan**: Trivy on every third-party image in the compose file, SARIF in the Security tab. |
+| [Security](.github/workflows/security.yml) | pull requests, pushes to `main`, Mondays 05:17 UTC | **Secrets**: gitleaks over the full history, fails on any finding. **CodeQL** for the workflows (language `actions`). **Image scan**: Trivy on every third-party image in the compose file (the list is read from `docker-compose.yml` on each run, so new services and Dependabot bumps are scanned without editing the workflow), SARIF in the Security tab. |
 | [Dependabot](.github/dependabot.yml) | weekly | One grouped PR for the compose images, one for the GitHub Actions. |
 
 Every action is pinned to a full commit SHA (version in a comment), and the tool images to a

@@ -1,0 +1,107 @@
+# Quality gate for ecommerce-infra (configuration only: no application code, no package manifest).
+# 1. compose: every compose file and profile combination parses and validates.
+# 2. gateway: the Traefik gateway starts from gateway/ and enforces its edge rules (routes not
+#    exposed, CORS, body limit, auth rate limit, security headers) without any service running.
+# 3. actionlint: the workflows themselves are valid.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compose:
+    name: Compose config
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The service build contexts (../ecommerce-*) are not checked out: `config` does not need them.
+      - name: Base file, every profile
+        run: docker compose --profile apps --profile tools --profile gateway-debug config -q
+      - name: Infra only (no profile)
+        run: docker compose config -q
+      - name: With the dev override
+        run: docker compose -f docker-compose.yml -f docker-compose.dev.yml --profile apps config -q
+
+  gateway:
+    name: Gateway smoke test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Start the gateway alone
+        run: |
+          docker compose --profile apps up -d --no-deps gateway
+          for _ in $(seq 1 30); do
+            curl -s -o /dev/null localhost:8090/ && break
+            sleep 1
+          done
+      - name: Check the edge rules
+        run: |
+          set -u
+          G=localhost:8090
+          fail() { echo "::error::$1"; exit 1; }
+
+          code=$(curl -s -o /dev/null -w '%{http_code}' $G/api/identity/.well-known/jwks.json)
+          [ "$code" = 404 ] || fail "JWKS is routed through the gateway ($code)"
+          code=$(curl -s -o /dev/null -w '%{http_code}' $G/dashboard/)
+          [ "$code" = 404 ] || fail "dashboard reachable ($code)"
+
+          pre() { curl -s -D - -o /dev/null -X OPTIONS $G/api/orders -H "Origin: $1" \
+                    -H 'Access-Control-Request-Method: POST' | tr -d '\r'; }
+          pre http://localhost:5173 | grep -qi '^access-control-allow-origin: http://localhost:5173$' \
+            || fail "allowed origin not accepted"
+          if pre http://evil.example | grep -qi '^access-control-allow-origin'; then
+            fail "foreign origin accepted"
+          fi
+
+          code=$(head -c 1100000 /dev/zero | curl -s -o /dev/null -w '%{http_code}' -X POST $G/api/orders \
+                   -H 'content-type: application/json' --data-binary @-)
+          [ "$code" = 413 ] || fail "1.1 MB body not rejected ($code)"
+
+          headers=$(curl -s -D - -o /dev/null $G/api/inventory/products | tr -d '\r')
+          for h in 'X-Content-Type-Options: nosniff' 'X-Frame-Options: DENY' 'Referrer-Policy: no-referrer' \
+                   "Content-Security-Policy: default-src 'none'; frame-ancestors 'none'"; do
+            grep -qiF "$h" <<<"$headers" || fail "missing header: $h"
+          done
+
+          codes=""
+          for _ in $(seq 1 12); do
+            codes="$codes $(curl -s -o /dev/null -w '%{http_code}' -X POST $G/api/identity/auth/login -d '{}')"
+          done
+          echo "login attempts:$codes"
+          grep -q 429 <<<"$codes" || fail "auth rate limit never answered 429"
+          echo "gateway edge rules OK"
+      - name: Gateway logs
+        if: always()
+        run: docker compose --profile apps logs gateway | tail -50
+      - name: Stop
+        if: always()
+        run: docker compose --profile apps down
+
+  actionlint:
+    name: Workflow lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: actionlint 1.7.12
+        run: >-
+          docker run --rm -v "$PWD:/repo" -w /repo
+          rhysd/actionlint@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667
+          -color

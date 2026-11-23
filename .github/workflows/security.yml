@@ -1,0 +1,127 @@
+# Security automation for ecommerce-infra. This repository has no application code and no package
+# manifest, so there is no dependency audit and no OSV-Scanner job (nothing to scan); see the
+# README, "CI and security". What it does have is scanned:
+#   secrets   gitleaks over the full git history, failing on any finding
+#   codeql    CodeQL for the GitHub Actions workflows (language "actions")
+#   images    Trivy on every third-party image the compose file runs, SARIF to the Security tab
+name: Security
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "17 5 * * 1" # Mondays 05:17 UTC
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  secrets:
+    name: Secrets (gitleaks, full history)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: gitleaks 8.30.1
+        run: >-
+          docker run --rm -v "$PWD:/repo"
+          ghcr.io/gitleaks/gitleaks@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f
+          git /repo --redact --no-banner --verbose --exit-code 1
+
+  codeql:
+    name: CodeQL (actions)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: github/codeql-action/init@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea # v4.39.4
+        with:
+          languages: actions
+      - uses: github/codeql-action/analyze@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea # v4.39.4
+        with:
+          category: /language:actions
+
+  images:
+    name: Image scan (${{ matrix.image }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        # enforce: the job fails on fixable HIGH/CRITICAL. Only the gateway is enforced: it is the
+        # one component exposed to clients, and its tag is ours to bump. The others are local-dev
+        # infrastructure published only on the developer's machine; their findings are reported in
+        # the Security tab without failing (threshold documented in the README).
+        include:
+          - image: traefik:v3.7
+            enforce: true
+          - image: postgres:16-alpine
+            enforce: false
+          - image: mongo:7
+            enforce: false
+          - image: confluentinc/cp-kafka:7.6.1
+            enforce: false
+          - image: provectuslabs/kafka-ui:v0.7.2
+            enforce: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: The image is the one docker-compose.yml runs
+        env:
+          IMAGE: ${{ matrix.image }}
+        run: |
+          docker compose --profile apps --profile tools config --images | grep -qxF "$IMAGE" \
+            || { echo "::error::$IMAGE is not in docker-compose.yml; update the matrix"; exit 1; }
+      # 1. Report: SARIF for the Security tab. Never fails, so the upload always happens.
+      - name: Trivy (SARIF report)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: v0.76.2
+          image-ref: ${{ matrix.image }}
+          scanners: vuln
+          format: sarif
+          output: trivy.sarif
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          limit-severities-for-sarif: true
+          hide-progress: true
+          exit-code: "0"
+      - name: Upload SARIF
+        uses: github/codeql-action/upload-sarif@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea # v4.39.4
+        with:
+          sarif_file: trivy.sarif
+          category: trivy-${{ matrix.image }}
+      # 2. Gate (enforced images only): same scan as a readable table in the log; fails on findings.
+      - name: Trivy (gate, fixable HIGH/CRITICAL)
+        if: matrix.enforce
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: v0.76.2
+          skip-setup-trivy: true
+          image-ref: ${{ matrix.image }}
+          scanners: vuln
+          format: table
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          hide-progress: true
+          exit-code: "1"

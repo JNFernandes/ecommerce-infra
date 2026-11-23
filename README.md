@@ -1,5 +1,8 @@
 # ecommerce-infra
 
+[![CI](https://github.com/JNFernandes/ecommerce-infra/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/JNFernandes/ecommerce-infra/actions/workflows/ci.yml)
+[![Security](https://github.com/JNFernandes/ecommerce-infra/actions/workflows/security.yml/badge.svg?branch=main)](https://github.com/JNFernandes/ecommerce-infra/actions/workflows/security.yml)
+
 Local runtime for the ecommerce platform: a set of microservices that place an order, charge it
 and reserve its stock, coordinated only through Kafka events (a choreographed saga). This
 repository holds the shared infrastructure and a `docker-compose.yml` that can also build and run
@@ -477,6 +480,59 @@ docker compose exec postgres-inventory psql -U inventory_user -d inventory -c "s
 docker compose exec postgres-payments psql -U payments_user -d payments -c 'select "OrderId","Status","Amount" from payments'
 docker compose exec mongo mongosh -u mongo_user -p mongo_pass --authenticationDatabase admin notifications --eval 'db.notifications.find({}, {type: 1, orderId: 1, _id: 0})'
 ```
+
+## CI and security
+
+This repository holds configuration only (compose files, the Traefik gateway, docs): there is no
+application code and no package manifest, so the services' quality gates (tests, linters,
+dependency audits) run in their own repositories.
+
+| Workflow | When | Jobs |
+|---|---|---|
+| [CI](.github/workflows/ci.yml) | pull requests, pushes to `main` | **Compose config**: every file and profile combination validates (the sibling repos are not needed). **Gateway smoke test**: starts the gateway alone and checks the edge rules (JWKS and dashboard not exposed, CORS allow/deny, `413` over 1 MB, security headers, `429` on the auth rate limit). **Workflow lint**: actionlint (with shellcheck). |
+| [Security](.github/workflows/security.yml) | pull requests, pushes to `main`, Mondays 05:17 UTC | **Secrets**: gitleaks over the full history, fails on any finding. **CodeQL** for the workflows (language `actions`). **Image scan**: Trivy on every third-party image in the compose file, SARIF in the Security tab. |
+| [Dependabot](.github/dependabot.yml) | weekly | One grouped PR for the compose images, one for the GitHub Actions. |
+
+Every action is pinned to a full commit SHA (version in a comment), and the tool images to a
+digest; Dependabot keeps them current. Jobs run with `contents: read`, plus `security-events:
+write` only where SARIF is uploaded.
+
+Not applicable here, so not run: a dependency audit and OSV-Scanner (no lockfile or manifest to
+scan) and a Dockerfile build (the images are built in the service repositories, which scan them).
+
+**Image scan threshold.** Trivy reports HIGH and CRITICAL vulnerabilities that have a fix
+(`ignore-unfixed`); unfixed and lower-severity ones are not reported. Only the gateway image
+(`traefik`) fails the job: it is the only component exposed to clients, and its tag is ours to
+bump. Postgres, MongoDB, Kafka and Kafka UI are local-development infrastructure. Their findings
+mostly sit in upstream binaries (`gosu`, the MongoDB tools, the JDK and Python inside the
+Confluent image) that only a new upstream image can fix, so they are uploaded to the Security tab
+without failing the pipeline. Review them there and accept the Dependabot image bumps.
+
+Run the same checks locally (Docker only):
+
+```bash
+docker compose --profile apps --profile tools --profile gateway-debug config -q
+docker compose -f docker-compose.yml -f docker-compose.dev.yml --profile apps config -q
+docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.12
+docker run --rm -v "$PWD:/repo" ghcr.io/gitleaks/gitleaks:v8.30.1 git /repo --redact -v
+docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy image \
+  --ignore-unfixed --severity HIGH,CRITICAL traefik:v3.7
+```
+
+The gateway smoke test is the script in `ci.yml` (job `gateway`), run against
+`docker compose --profile apps up -d --no-deps gateway`.
+
+**Handling a finding**
+
+- **Secret (gitleaks)**: treat it as leaked. Revoke or rotate it first, then remove it from the
+  code. Rewriting history does not undo the leak. Only for a proven false positive, add a
+  `.gitleaksignore` entry with its fingerprint and the reason in the PR.
+- **Image vulnerability (Trivy)**: bump the image tag in `docker-compose.yml` (or merge the
+  Dependabot PR), re-run the scan, then verify the stack (`down -v`, `--profile apps up -d
+  --build`, the end-to-end demo). If no fixed image exists yet, record why in the PR and dismiss
+  the alert in the Security tab with a reason; never lower the threshold for everyone.
+- **CodeQL (workflows)**: fix the workflow (typically untrusted input in a `run:` script, or
+  excess permissions); dismiss only with a written reason.
 
 ## Reset
 

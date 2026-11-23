@@ -13,6 +13,11 @@ entryPoints:
         readTimeout: 30s    # whole request, body included
         writeTimeout: 30s   # whole response
         idleTimeout: 60s    # keep-alive connections
+    http:
+      # Drop headers whose name aliases another (X_Forwarded_For, X.Forwarded.For): ASGI/WSGI
+      # backends would read them as the real header. Encoded-character rejection keeps the
+      # secure v3.6+ defaults.
+      aliasHeadersStrategy: delete
     # No trustedIPs: X-Forwarded-* sent by clients are discarded and Traefik sets its own.
 
 # Timeouts towards the services.

@@ -188,10 +188,11 @@ other services must expect when they verify Identity's tokens.
 
 ## HTTP APIs
 
-Four services have an HTTP API for clients such as a browser frontend. Orders, Inventory and
-Notifications have no authentication yet and are meant for local and demo use; Identity issues the
-tokens. Services never call each other over HTTP:
-Kafka events remain the only service-to-service communication (see
+Four services have an HTTP API for clients such as a browser frontend. Identity issues RS256
+access tokens; Orders and Notifications verify them locally against Identity's public keys
+(`IDENTITY_JWKS_URL=http://identity:3001/.well-known/jwks.json`, fetched on the first
+authenticated request and cached, never at startup). Inventory's catalog is public. Services never
+call each other's APIs: Kafka events remain the only service-to-service communication (see
 [docs/events.md](docs/events.md#http-apis)).
 
 | Service | Endpoints | Interactive docs |
@@ -201,46 +202,21 @@ Kafka events remain the only service-to-service communication (see
 | Notifications `localhost:8000` | `GET /notifications?customerId=&orderId=&type=&limit=&offset=`, `GET /notifications/{id}` (404 if unknown), `GET /health/live`, `GET /health/ready` | http://localhost:8000/docs, OpenAPI at `/openapi.json` |
 | Identity `localhost:3001` | `POST /auth/register`, `POST /auth/login`, `POST /auth/refresh`, `POST /auth/logout`, `GET /users/me`, the admin `/users` endpoints, `GET /.well-known/jwks.json`, `GET /health` (full list in the Identity README) | Swagger UI at http://localhost:3001/docs |
 
-```bash
-# Orders: place an order, then read orders through GraphQL
-curl -s -X POST localhost:3000/orders -H 'content-type: application/json' \
-  -d '{"customerId":"3fa85f64-5717-4562-b3fc-2c963f66afa6","items":[{"productId":"SKU-003","quantity":2,"unitPrice":19.99}]}'
-curl -s localhost:3000/graphql -H 'content-type: application/json' \
-  -d '{"query":"{ orders(customerId: \"3fa85f64-5717-4562-b3fc-2c963f66afa6\", limit: 5) { totalCount items { orderId status totalAmount } } }"}'
+The issuer and audience are defined once in `docker-compose.yml` (`x-jwt`, defaults
+`http://localhost:3001` and `ecommerce`, overridable with `JWT_ISSUER` / `JWT_AUDIENCE` in the host
+environment) and shared by Identity, Orders and Notifications, so they cannot drift.
+`JWT_CLOCK_TOLERANCE_SECONDS` (default `5`) sets the allowed clock skew in Orders and
+Notifications. Both start without Identity (`depends_on` is `service_started` only).
 
-# Inventory: the catalog with available stock, or one product
-curl -s localhost:8081/products
-curl -s localhost:8081/products/SKU-003
+### Access rules
 
-# Notifications: what the customer was told
-curl -s "localhost:8000/notifications?customerId=3fa85f64-5717-4562-b3fc-2c963f66afa6"
-```
-
-Identity: register a customer, log in, then call a protected route with the access token:
-
-```bash
-curl -s -X POST localhost:3001/auth/register -H 'content-type: application/json' \
-  -d '{"email":"jane@example.com","name":"Jane Doe","password":"a-long-password-1"}'
-# → 201 {"id":"…","customerId":"…","email":"jane@example.com","name":"Jane Doe","roles":["CUSTOMER"],"createdAt":"…"}
-
-curl -s -X POST localhost:3001/auth/login -H 'content-type: application/json' \
-  -d '{"email":"jane@example.com","password":"a-long-password-1"}'
-# → 200 {"accessToken":"…","refreshToken":"…","tokenType":"Bearer","expiresIn":900}
-
-curl -s localhost:3001/users/me -H 'Authorization: Bearer <accessToken>'
-```
-
-```powershell
-$cred = @{ email = 'jane@example.com'; password = 'a-long-password-1' }
-Invoke-RestMethod -Method Post -Uri http://localhost:3001/auth/register -ContentType 'application/json' `
-  -Body (@{ email = $cred.email; name = 'Jane Doe'; password = $cred.password } | ConvertTo-Json)
-$t = Invoke-RestMethod -Method Post -Uri http://localhost:3001/auth/login -ContentType 'application/json' -Body ($cred | ConvertTo-Json)
-Invoke-RestMethod http://localhost:3001/users/me -Headers @{ Authorization = "Bearer $($t.accessToken)" }
-```
-
-Registration publishes `identity.user-registered` (key: the user id). With `--profile tools` it
-shows in Kafka UI → Topics → `identity.user-registered` → Messages. Registration is rate limited
-to 5 per minute per client IP, and login to 10 per minute per IP and per email.
+| Service | Anonymous | `CUSTOMER` | `ADMIN` |
+|---|---|---|---|
+| Identity | `/auth/register`, `/auth/login`, `/auth/refresh`, `/auth/logout`, JWKS, `/health`, `/docs` | `GET /users/me`, `POST /users/me/password` | as customer, plus `/users`, `/users/{id}`, `/users/{id}/status`, `/users/{id}/roles`, `/audit` |
+| Orders | Swagger only; every API call is 401 (GraphQL: `UNAUTHENTICATED` error) | `POST /orders` for themselves (no `customerId` in the body); cancel own `PENDING` orders; GraphQL `order` / `orders` return only their own (another customer's order is `null`, cancelling it 404) | every order in GraphQL (`customerId` filter allowed); cancel and confirm any order; cannot place orders (403) |
+| Notifications | `/health/live`, `/health/ready`, `/docs`; `/notifications` is 401 | only their own notifications (another customer's are invisible: empty list / 404) | every notification, any `customerId` filter |
+| Inventory | `GET /products`, `GET /products/{id}`, health (no authentication) | same | same |
+| Payments | no HTTP API | — | — |
 
 ### CORS
 
@@ -272,91 +248,117 @@ Created by `kafka-init` with 3 partitions and replication factor 1 (auto-creatio
 `inventory.stock-reserved`, `inventory.stock-rejected`, `inventory.stock-released`,
 `identity.user-registered`.
 
-## Demo scenarios
+## End-to-end demo
 
-Start everything with `--profile apps`. Every scenario places an order for the seeded customer,
-reads it back through GraphQL, then reads the notifications it produced. The saga takes a second
-or two, so a query right after the `POST` may still show `PENDING` or fewer notifications; query
-again.
+Every order belongs to the customer in the access token, so the flow is: register, log in, place
+orders with the token, read them back. The seeded customer `3fa85f64-…` has no Identity account and
+cannot be used for new orders. The saga takes a second or two, so a query right after the `POST`
+may still show `PENDING` or fewer notifications; query again.
 
-You can also use Postman, or Swagger at http://localhost:3000/api to place orders.
-
-### bash (Linux, macOS, Git Bash, WSL)
-
-Place an order:
-
-```bash
-curl -s -X POST localhost:3000/orders -H 'content-type: application/json' -d '{
-  "customerId": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
-  "items": [{ "productId": "SKU-003", "quantity": 2, "unitPrice": 19.99 }]
-}'
-# → 201 {"orderId":"<id>"}
-```
-
-Read it back (replace `<id>`):
-
-```bash
-curl -s localhost:3000/graphql -H 'content-type: application/json' -d '{
-  "query": "{ order(orderId: \"<id>\") { orderId status totalAmount cancellationReason items { productId quantity } } }"
-}'
-```
-
-Read its notifications (newest first), or all of the customer's:
-
-```bash
-curl -s "localhost:8000/notifications?orderId=<id>"
-curl -s "localhost:8000/notifications?customerId=3fa85f64-5717-4562-b3fc-2c963f66afa6"
-# → {"items":[{"id":"…","customerId":"3fa85f64-…","orderId":"<id>","type":"ORDER_CONFIRMED",
-#     "channel":"email","message":"Your order <id> was confirmed.","status":"SENT",
-#     "createdAt":"…","sourceEventId":"…"}, …],"total":2,"limit":20,"offset":0}
-```
-
-Optional filters: `type` (`ORDER_RECEIVED`, `ORDER_CONFIRMED`, `ORDER_CANCELLED`,
-`PAYMENT_REFUNDED`), `limit` (1–100, default 20) and `offset`. One notification:
-`curl -s localhost:8000/notifications/<notificationId>` (404 if unknown).
-
-### PowerShell (Windows)
-
-In Windows PowerShell, `curl` is an alias for `Invoke-WebRequest`, so use `Invoke-RestMethod`:
+### 1. Keys and stack (from empty volumes)
 
 ```powershell
-# Place an order
-$body = @{
-  customerId = '3fa85f64-5717-4562-b3fc-2c963f66afa6'
-  items      = @(@{ productId = 'SKU-003'; quantity = 2; unitPrice = 19.99 })
-} | ConvertTo-Json -Depth 5
-$r = Invoke-RestMethod -Method Post -Uri http://localhost:3000/orders -ContentType 'application/json' -Body $body
-$r.orderId
-
-# Read it back
-$q = @{ query = "{ order(orderId: `"$($r.orderId)`") { orderId status totalAmount cancellationReason items { productId quantity } } }" } | ConvertTo-Json
-(Invoke-RestMethod -Method Post -Uri http://localhost:3000/graphql -ContentType 'application/json' -Body $q).data.order | Format-List
-
-# Read its notifications, then all of the customer's
-(Invoke-RestMethod "http://localhost:8000/notifications?orderId=$($r.orderId)").items | Format-Table type, message
-(Invoke-RestMethod 'http://localhost:8000/notifications?customerId=3fa85f64-5717-4562-b3fc-2c963f66afa6').items | Format-Table orderId, type, createdAt
+cd ..\ecommerce-identity; npm ci; npm run keys:generate; cd ..\ecommerce-infra
+docker compose --profile apps down -v
+$env:ADMIN_EMAIL = 'admin@example.com'; $env:ADMIN_PASSWORD = 'Admin-Passw0rd!'; $env:ADMIN_NAME = 'Admin'
+docker compose --profile apps up -d --build
+Remove-Item Env:ADMIN_PASSWORD
+docker compose --profile apps ps      # orders, inventory, notifications, identity: healthy
 ```
 
-For the other scenarios, change `items` as in the table below, for example
-`items = @(@{ productId = 'SKU-999'; quantity = 1; unitPrice = 9.99 })`.
+```bash
+(cd ../ecommerce-identity && npm ci && npm run keys:generate)
+docker compose --profile apps down -v
+ADMIN_EMAIL=admin@example.com ADMIN_PASSWORD='Admin-Passw0rd!' ADMIN_NAME=Admin \
+  docker compose --profile apps up -d --build
+```
 
-### Postman
+### 2. Customer: register, log in, order, read
 
-`POST http://localhost:3000/orders` with a raw JSON body as above, then
-`POST http://localhost:3000/graphql` with body type GraphQL and the same query, then
-`GET http://localhost:8000/notifications?orderId=<id>`.
+PowerShell (`curl` is an alias of `Invoke-WebRequest` in Windows PowerShell, so use
+`Invoke-RestMethod`):
+
+```powershell
+$cred = @{ email = 'alice@example.com'; password = 'a-long-password-1' }
+Invoke-RestMethod -Method Post http://localhost:3001/auth/register -ContentType 'application/json' `
+  -Body (@{ email = $cred.email; name = 'Alice'; password = $cred.password } | ConvertTo-Json)
+$tok = (Invoke-RestMethod -Method Post http://localhost:3001/auth/login -ContentType 'application/json' -Body ($cred | ConvertTo-Json)).accessToken
+$h = @{ Authorization = "Bearer $tok" }
+
+# Place an order (no customerId: it comes from the token)
+$body = @{ items = @(@{ productId = 'SKU-003'; quantity = 2; unitPrice = 19.99 }) } | ConvertTo-Json -Depth 5
+$r = Invoke-RestMethod -Method Post http://localhost:3000/orders -Headers $h -ContentType 'application/json' -Body $body
+
+# Read it with GraphQL
+$q = @{ query = "{ order(orderId: `"$($r.orderId)`") { orderId status totalAmount cancellationReason items { productId quantity } } }" } | ConvertTo-Json
+(Invoke-RestMethod -Method Post http://localhost:3000/graphql -Headers $h -ContentType 'application/json' -Body $q).data.order
+
+# Read its notifications (newest first)
+(Invoke-RestMethod "http://localhost:8000/notifications?orderId=$($r.orderId)" -Headers $h).items | Format-Table type, message
+```
+
+curl (bash, Git Bash, WSL):
+
+```bash
+curl -s -X POST localhost:3001/auth/register -H 'content-type: application/json' \
+  -d '{"email":"alice@example.com","name":"Alice","password":"a-long-password-1"}'
+# → 201 {"id":"…","customerId":"…","email":"alice@example.com","name":"Alice","roles":["CUSTOMER"],…}
+TOKEN=$(curl -s -X POST localhost:3001/auth/login -H 'content-type: application/json' \
+  -d '{"email":"alice@example.com","password":"a-long-password-1"}' | sed -E 's/.*"accessToken":"([^"]+)".*/\1/')
+
+curl -s -X POST localhost:3000/orders -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+  -d '{"items":[{"productId":"SKU-003","quantity":2,"unitPrice":19.99}]}'
+# → 201 {"orderId":"<id>"}
+
+curl -s localhost:3000/graphql -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+  -d '{"query":"{ orders(limit: 10) { totalCount items { orderId status totalAmount cancellationReason } } }"}'
+
+curl -s "localhost:8000/notifications?orderId=<id>" -H "Authorization: Bearer $TOKEN"
+# → {"items":[{"id":"…","customerId":"…","orderId":"<id>","type":"ORDER_CONFIRMED","channel":"email",
+#     "message":"Your order <id> was confirmed.","status":"SENT","createdAt":"…","sourceEventId":"…"},…],
+#    "total":2,"limit":20,"offset":0}
+```
+
+Registration publishes `identity.user-registered`; Orders creates the customer from it. An order
+placed in the first instant after registration can answer `404` (customer not known yet): retry.
+
+### 3. Admin: every order, user and notification
+
+```powershell
+$adm = (Invoke-RestMethod -Method Post http://localhost:3001/auth/login -ContentType 'application/json' `
+  -Body (@{ email = 'admin@example.com'; password = 'Admin-Passw0rd!' } | ConvertTo-Json)).accessToken
+$ha = @{ Authorization = "Bearer $adm" }
+$q = @{ query = '{ orders(limit: 50) { totalCount items { orderId customerId status } } }' } | ConvertTo-Json
+(Invoke-RestMethod -Method Post http://localhost:3000/graphql -Headers $ha -ContentType 'application/json' -Body $q).data.orders.items
+(Invoke-RestMethod http://localhost:3001/users -Headers $ha).items | Format-Table email, roles, status
+(Invoke-RestMethod 'http://localhost:8000/notifications?limit=100' -Headers $ha).items | Format-Table customerId, type
+```
+
+```bash
+ADMIN=$(curl -s -X POST localhost:3001/auth/login -H 'content-type: application/json' \
+  -d '{"email":"admin@example.com","password":"Admin-Passw0rd!"}' | sed -E 's/.*"accessToken":"([^"]+)".*/\1/')
+curl -s localhost:3000/graphql -H "Authorization: Bearer $ADMIN" -H 'content-type: application/json' \
+  -d '{"query":"{ orders(limit: 50) { totalCount items { orderId customerId status } } }"}'
+curl -s localhost:3001/users -H "Authorization: Bearer $ADMIN"
+curl -s "localhost:8000/notifications?limit=100" -H "Authorization: Bearer $ADMIN"
+```
+
+A second customer (register and log in as `bob@example.com`) gets `totalCount: 0`, an empty
+notification list, `order: null` for Alice's order id and `404` when cancelling it.
 
 ### Expected results
 
-| Scenario | Items in the request | Expected `status` and `cancellationReason` | Side effects |
+Place each order with the customer token, changing only `items`:
+
+| Scenario | Items | `status`, `cancellationReason` | Side effects |
 |---|---|---|---|
 | Happy path | `SKU-003` × 2 at 19.99 | `CONFIRMED`, `null` | Payment `Processed`; `SKU-003` stock 100 → 98 |
-| Payment failure | `SKU-001` × 1 at 15000 | `CANCELLED`, `payment failed: Amount 15000 USD exceeds the maximum allowed threshold of 10000.00 USD.` | Payment `Failed`; the stock reserved for it is released, so `SKU-001` stays at 10 |
-| Stock rejection | `SKU-005` × 1 at 9.99 (or more units than available, e.g. `SKU-004` × 6) | `CANCELLED`, `stock rejected: insufficient stock` | Payment `Processed`, then `Refunded` |
+| Payment failure | `SKU-001` × 1 at 15000 | `CANCELLED`, `payment failed: Amount 15000 USD exceeds the maximum allowed threshold of 10000.00 USD.` | Payment `Failed`; the reserved stock is released, `SKU-001` stays at 10 |
+| Stock rejection | `SKU-005` × 1 at 9.99 (or `SKU-004` × 6) | `CANCELLED`, `stock rejected: insufficient stock` | Payment `Processed`, then `Refunded` |
 | Unknown product | `SKU-999` × 1 at 9.99 | `CANCELLED`, `stock rejected: unknown product` | Payment `Processed`, then `Refunded` |
 
-Notifications each scenario produces (`GET /notifications?orderId=<id>`). They are listed here in
-the order they are recorded; the API returns them newest first.
+Notifications per order (`GET /notifications?orderId=<id>`), in recording order (the API returns
+newest first):
 
 | Scenario | Notifications (`type`: `message`) |
 |---|---|
@@ -365,8 +367,9 @@ the order they are recorded; the API returns them newest first.
 | Stock rejection | `ORDER_RECEIVED`: `Your order <id> for 9.99 was received.`<br>`ORDER_CANCELLED`: `Your order <id> was cancelled: stock rejected: insufficient stock.`<br>`PAYMENT_REFUNDED`: `Your payment of 9.99 USD for order <id> was refunded.` |
 | Unknown product | `ORDER_RECEIVED`: `Your order <id> for 9.99 was received.`<br>`ORDER_CANCELLED`: `Your order <id> was cancelled: stock rejected: unknown product.`<br>`PAYMENT_REFUNDED`: `Your payment of 9.99 USD for order <id> was refunded.` |
 
-Every notification has `channel` `email` and `status` `SENT`. Sending is simulated: Notifications
-stores and logs it, and no email leaves the machine.
+Every notification has `channel` `email` and `status` `SENT`; sending is simulated (stored and
+logged only). Optional filters: `type` (`ORDER_RECEIVED`, `ORDER_CONFIRMED`, `ORDER_CANCELLED`,
+`PAYMENT_REFUNDED`), `limit` (1–100, default 20), `offset`.
 
 To watch the events, start with `--profile tools` and open Kafka UI → Topics. To check the
 databases directly:
@@ -431,3 +434,17 @@ rows alone.
   container, or a Notifications (`uvicorn --port 8000`), Inventory (Spring Boot, 8081) or Identity
   (`npm run start:dev`, 3001) dev server still running from the IDE. `docker ps` and
   `netstat -ano | findstr :8000` show the owner.
+- **Identity keys missing**: `identity` keeps restarting and logs that the private key cannot be
+  read. Run `npm run keys:generate` in `../ecommerce-identity`, then
+  `docker compose --profile apps up -d identity`.
+- **401 from Orders or Notifications**: no `Authorization: Bearer` header, a token older than 15
+  minutes (log in again or use `/auth/refresh`), or a token from an Identity with another issuer or
+  audience. The body never says which; check that `JWT_ISSUER` / `JWT_AUDIENCE` were not overridden
+  for only one service (compose shares them through `x-jwt`).
+- **403**: the token is valid but the role does not allow the call, e.g. an admin placing an order
+  or a customer calling `/users`.
+- **503 `authentication unavailable` / `SERVICE_UNAVAILABLE`**: Identity's keys have never been
+  fetched since the service started, because Identity is down. Health endpoints stay 200 and events
+  keep flowing. Start Identity (`docker compose start identity`); requests succeed again within
+  about a minute (the key refetch is throttled). Keys already cached keep working while Identity is
+  down.

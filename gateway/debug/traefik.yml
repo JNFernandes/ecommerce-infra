@@ -1,0 +1,31 @@
+# Traefik static configuration of the "gateway-debug" profile: the dashboard, plus the
+# services' Swagger UIs, published on 127.0.0.1 only. Never part of the "apps" profile.
+
+global:
+  checkNewVersion: false
+  sendAnonymousUsage: false
+
+entryPoints:
+  traefik:            # dashboard and API (api.insecure), host 127.0.0.1:8091
+    address: ":8080"
+  docs-orders:        # host 127.0.0.1:9000
+    address: ":9000"
+  docs-identity:      # host 127.0.0.1:9001
+    address: ":9001"
+  docs-inventory:     # host 127.0.0.1:9081
+    address: ":9081"
+  docs-notifications: # host 127.0.0.1:9080
+    address: ":9080"
+
+api:
+  dashboard: true
+  insecure: true
+
+providers:
+  file:
+    filename: /etc/traefik/dynamic.yml
+    watch: false
+
+log:
+  level: INFO
+  format: json

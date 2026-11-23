@@ -1,0 +1,138 @@
+# Traefik dynamic configuration: routes, middlewares and backends of the API gateway.
+# This file is a Go template: GATEWAY_CORS_ORIGINS (comma-separated) is read from the
+# environment of the gateway container when Traefik starts.
+#
+# Public API (entrypoint web, host port 8090):
+#   /api/identity/{auth,users,audit}/...  -> identity:3001/{auth,users,audit}/...
+#   /api/orders[/...]                     -> orders:3000/orders[/...]
+#   /api/graphql                          -> orders:3000/graphql
+#   /api/inventory/products[/...]         -> inventory:8081/products[/...]
+#   /api/notifications[/...]              -> notifications:8000/notifications[/...]
+# Anything else (JWKS, Swagger UIs, health, actuator) has no route and answers 404.
+
+http:
+  routers:
+    identity-auth-strict:
+      entryPoints: [web]
+      priority: 100
+      rule: >-
+        Path(`/api/identity/auth/login`) || Path(`/api/identity/auth/register`) ||
+        Path(`/api/identity/auth/refresh`) || Path(`/api/identity/users/me/password`)
+      middlewares: [rate-limit-auth, api, strip-identity]
+      service: identity
+
+    identity:
+      entryPoints: [web]
+      priority: 50
+      rule: >-
+        PathPrefix(`/api/identity/auth/`) ||
+        Path(`/api/identity/users`) || PathPrefix(`/api/identity/users/`) ||
+        Path(`/api/identity/audit`) || PathPrefix(`/api/identity/audit/`)
+      middlewares: [api, strip-identity]
+      service: identity
+
+    orders:
+      entryPoints: [web]
+      rule: Path(`/api/orders`) || PathPrefix(`/api/orders/`)
+      middlewares: [api, strip-api]
+      service: orders
+
+    orders-graphql:
+      entryPoints: [web]
+      rule: Path(`/api/graphql`)
+      middlewares: [api, strip-api]
+      service: orders
+
+    inventory:
+      entryPoints: [web]
+      rule: Path(`/api/inventory/products`) || PathPrefix(`/api/inventory/products/`)
+      middlewares: [api, strip-inventory]
+      service: inventory
+
+    notifications:
+      entryPoints: [web]
+      rule: Path(`/api/notifications`) || PathPrefix(`/api/notifications/`)
+      middlewares: [api, strip-api]
+      service: notifications
+
+  middlewares:
+    # Applied to every route, in this order.
+    api:
+      chain:
+        middlewares: [rate-limit-global, cors, security-headers, body-limit, compress]
+
+    # (a) Rate limits per client IP (the TCP peer address; client X-Forwarded-For is ignored).
+    rate-limit-global:
+      rateLimit:
+        average: 50
+        period: 1s
+        burst: 100
+    rate-limit-auth:
+      rateLimit:
+        average: 10
+        period: 1m
+        burst: 5
+
+    # (b) Security headers. Empty custom values remove the header from the response.
+    security-headers:
+      headers:
+        contentTypeNosniff: true
+        frameDeny: true
+        referrerPolicy: no-referrer
+        permissionsPolicy: "camera=(), microphone=(), geolocation=()"
+        contentSecurityPolicy: "default-src 'none'; frame-ancestors 'none'"
+        # TLS only: enable once the gateway terminates HTTPS (never over plain HTTP).
+        # stsSeconds: 31536000
+        # stsIncludeSubdomains: true
+        customResponseHeaders:
+          Server: ""
+          X-Powered-By: ""
+
+    # (c) CORS at the edge: exact origins, no wildcard, no credentials; preflight answered here.
+    cors:
+      headers:
+        accessControlAllowOriginList:
+{{- range $origin := splitList "," (env "GATEWAY_CORS_ORIGINS") }}
+{{- if trim $origin }}
+          - "{{ trim $origin }}"
+{{- end }}
+{{- end }}
+        accessControlAllowMethods: [GET, POST, PUT, PATCH, DELETE, OPTIONS]
+        accessControlAllowHeaders: [Authorization, Content-Type]
+        accessControlAllowCredentials: false
+        accessControlMaxAge: 600
+        addVaryHeader: true
+
+    # (d) Request bodies up to 1 MB (413 above); timeouts are on the entrypoint (traefik.yml).
+    body-limit:
+      buffering:
+        maxRequestBodyBytes: 1048576
+        memRequestBodyBytes: 1048576
+
+    # (e) Compressed responses when the client accepts them.
+    compress:
+      compress: {}
+
+    strip-api:
+      stripPrefix:
+        prefixes: ["/api"]
+    strip-identity:
+      stripPrefix:
+        prefixes: ["/api/identity"]
+    strip-inventory:
+      stripPrefix:
+        prefixes: ["/api/inventory"]
+
+  services:
+    identity:
+      loadBalancer:
+        servers: [{ url: "http://identity:3001" }]
+    orders:
+      loadBalancer:
+        servers: [{ url: "http://orders:3000" }]
+    inventory:
+      loadBalancer:
+        servers: [{ url: "http://inventory:8081" }]
+    notifications:
+      loadBalancer:
+        servers: [{ url: "http://notifications:8000" }]

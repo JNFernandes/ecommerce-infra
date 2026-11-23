@@ -106,7 +106,7 @@ docker compose --profile apps up -d --build
 Add `--profile tools` to either command to also start Kafka UI on http://localhost:8080.
 
 `docker compose --profile apps ps` should show `orders`, `inventory`, `notifications` and `identity` as `healthy`,
-`payments` as `Up` (it has no HTTP endpoint). Add `-a` to also see `kafka-init` and `orders-seed`,
+`payments` and `gateway` as `Up` (no healthcheck). Add `-a` to also see `kafka-init` and `orders-seed`,
 which should both be `Exited (0)`.
 
 What happens on start:
@@ -140,10 +140,11 @@ and the internal port.
 
 | Component | Host | Internal | Database | User / password |
 |---|---|---|---|---|
-| Orders (REST, GraphQL at `/graphql`, Swagger at `/api`) | `localhost:3000` | `orders:3000` | | |
-| Inventory (products API, Swagger UI at `/swagger-ui.html`, health at `/actuator/health`) | `localhost:8081` | `inventory:8081` | | |
-| Notifications (read API, docs at `/docs`, health at `/health/ready`) | `localhost:8000` | `notifications:8000` | | |
-| Identity (auth API, Swagger UI at `/docs`, health at `/health`, JWKS at `/.well-known/jwks.json`) | `localhost:3001` | `identity:3001` | | |
+| API gateway (`apps` profile; see [API gateway](#api-gateway)) | `localhost:8090/api/...` | | | |
+| Orders (REST, GraphQL at `/graphql`, Swagger at `/api`) | via gateway `/api/orders`, `/api/graphql` | `orders:3000` | | |
+| Inventory (products API, Swagger UI at `/swagger-ui.html`, health at `/actuator/health`) | via gateway `/api/inventory/products` | `inventory:8081` | | |
+| Notifications (read API, docs at `/docs`, health at `/health/ready`) | via gateway `/api/notifications` | `notifications:8000` | | |
+| Identity (auth API, Swagger UI at `/docs`, health at `/health`, JWKS at `/.well-known/jwks.json`) | via gateway `/api/identity/...` | `identity:3001` | | |
 | Payments | not published | | | |
 | Kafka | `localhost:9092` | `kafka:29092` | | |
 | Kafka UI (`tools` profile) | `localhost:8080` | | | |
@@ -153,7 +154,9 @@ and the internal port.
 | Postgres Identity | `localhost:5435` | `postgres-identity:5432` | `identity` | `identity_user` / `identity_pass` |
 | MongoDB | `localhost:27017` | `mongo:27017` | `orders_read` (Orders read model), `notifications` (Notifications) | `mongo_user` / `mongo_pass`, auth database `admin` |
 
-These credentials are for local development only. Notifications consumes in the Kafka group
+With `docker-compose.dev.yml` the four services are also published on the internal port
+(`localhost:3000`, `3001`, `8000`, `8081`). These credentials are for local development only.
+Notifications consumes in the Kafka group
 `notifications-service`.
 
 ### Identity admin
@@ -188,7 +191,9 @@ other services must expect when they verify Identity's tokens.
 
 ## HTTP APIs
 
-Four services have an HTTP API for clients such as a browser frontend. Identity issues RS256
+Four services have an HTTP API for clients such as a browser frontend, reached through the
+[API gateway](#api-gateway) at `http://localhost:8090/api/...` (the table lists the paths inside
+each service; the gateway prefix is in brackets). Identity issues RS256
 access tokens; Orders and Notifications verify them locally against Identity's public keys
 (`IDENTITY_JWKS_URL=http://identity:3001/.well-known/jwks.json`, fetched on the first
 authenticated request and cached, never at startup). Inventory's catalog is public. Services never
@@ -197,10 +202,10 @@ call each other's APIs: Kafka events remain the only service-to-service communic
 
 | Service | Endpoints | Interactive docs |
 |---|---|---|
-| Orders `localhost:3000` | `POST /orders`, `POST /orders/{orderId}/cancel`, `POST /orders/{orderId}/confirm`; GraphQL `POST /graphql` with the queries `order(orderId)` and `orders(status, customerId, limit, offset)` | Swagger UI at http://localhost:3000/api |
-| Inventory `localhost:8081` | `GET /products?limit=&offset=`, `GET /products/{id}` (404 if unknown), `GET /actuator/health` | Swagger UI at http://localhost:8081/swagger-ui.html, OpenAPI at `/v3/api-docs` |
-| Notifications `localhost:8000` | `GET /notifications?customerId=&orderId=&type=&limit=&offset=`, `GET /notifications/{id}` (404 if unknown), `GET /health/live`, `GET /health/ready` | http://localhost:8000/docs, OpenAPI at `/openapi.json` |
-| Identity `localhost:3001` | `POST /auth/register`, `POST /auth/login`, `POST /auth/refresh`, `POST /auth/logout`, `GET /users/me`, the admin `/users` endpoints, `GET /.well-known/jwks.json`, `GET /health` (full list in the Identity README) | Swagger UI at http://localhost:3001/docs |
+| Orders (`/api/orders`, `/api/graphql`) | `POST /orders`, `POST /orders/{orderId}/cancel`, `POST /orders/{orderId}/confirm`; GraphQL `POST /graphql` with the queries `order(orderId)` and `orders(status, customerId, limit, offset)` | Swagger UI: `gateway-debug` profile, 127.0.0.1:9000/api |
+| Inventory (`/api/inventory`) | `GET /products?limit=&offset=`, `GET /products/{id}` (404 if unknown); `GET /actuator/health` internal only | Swagger UI: `gateway-debug` profile, 127.0.0.1:9081/swagger-ui/index.html |
+| Notifications (`/api/notifications`) | `GET /notifications?customerId=&orderId=&type=&limit=&offset=`, `GET /notifications/{id}` (404 if unknown); `GET /health/live`, `GET /health/ready` internal only | Docs: `gateway-debug` profile, 127.0.0.1:9080/docs |
+| Identity (`/api/identity`) | `POST /auth/register`, `POST /auth/login`, `POST /auth/refresh`, `POST /auth/logout`, `GET /users/me`, the admin `/users` and `/audit` endpoints (full list in the Identity README); `GET /.well-known/jwks.json`, `GET /health` internal only | Swagger UI: `gateway-debug` profile, 127.0.0.1:9001/docs |
 
 The issuer and audience are defined once in `docker-compose.yml` (`x-jwt`, defaults
 `http://localhost:3001` and `ecommerce`, overridable with `JWT_ISSUER` / `JWT_AUDIENCE` in the host
@@ -220,24 +225,25 @@ Notifications. Both start without Identity (`depends_on` is `service_started` on
 
 ### CORS
 
-All four APIs read the same variable, `CORS_ALLOWED_ORIGINS` (comma-separated exact origins).
-The compose file defaults it to `http://localhost:5173`, a frontend dev server, for all four. To
-change it, set it in the host environment before `up`; the value applies to every service:
+The gateway answers CORS for every API: `GATEWAY_CORS_ORIGINS` (comma-separated exact origins,
+default `http://localhost:5173`). Set it in the host environment before `up`:
 
 ```bash
-CORS_ALLOWED_ORIGINS=http://localhost:5173,http://localhost:4200 docker compose --profile apps up -d
+GATEWAY_CORS_ORIGINS=http://localhost:5173,http://localhost:4200 docker compose --profile apps up -d
 ```
 
 ```powershell
-$env:CORS_ALLOWED_ORIGINS = 'http://localhost:5173,http://localhost:4200'
+$env:GATEWAY_CORS_ORIGINS = 'http://localhost:5173,http://localhost:4200'
 docker compose --profile apps up -d
 ```
 
-Allowed methods: Orders `GET`, `POST` (and preflight `OPTIONS`); Identity `GET`, `POST`, `PATCH`
-(and `OPTIONS`), with the `Authorization` header; Inventory and Notifications `GET` only. Any other origin gets no CORS headers, so the browser blocks the call. Check it with:
+Behind the gateway the services' own `CORS_ALLOWED_ORIGINS` is empty, so they add no CORS headers
+of their own. With `docker-compose.dev.yml` (direct access) it is `http://localhost:5173` again
+(override with `CORS_ALLOWED_ORIGINS`). Any other origin gets no `Access-Control-Allow-Origin`, so
+the browser blocks the call. Check it with:
 
 ```bash
-curl -s -D - -o /dev/null -H 'Origin: http://localhost:5173' localhost:8081/products | grep -i access-control
+curl -s -D - -o /dev/null -X OPTIONS localhost:8090/api/orders -H 'Origin: http://localhost:5173'   -H 'Access-Control-Request-Method: POST' | grep -i access-control
 ```
 
 ### Kafka topics
@@ -247,6 +253,98 @@ Created by `kafka-init` with 3 partitions and replication factor 1 (auto-creatio
 `payments.payment-processed`, `payments.payment-failed`, `payments.payment-refunded`,
 `inventory.stock-reserved`, `inventory.stock-rejected`, `inventory.stock-released`,
 `identity.user-registered`.
+
+## API gateway
+
+With `--profile apps`, a Traefik gateway is the only published entry to the application APIs:
+**http://localhost:8090/api/...**. Orders, Identity, Inventory and Notifications publish no host
+port (the databases, Kafka and MongoDB keep theirs for the infra-only workflow). Configuration
+only, in [`gateway/`](gateway) (mounted read-only): `traefik.yml` (static) and
+`dynamic/routes.yml` (routes, middlewares). Traefik uses the file provider only: the Docker socket
+is not mounted, and the dashboard and API are off.
+
+### Routes
+
+| Gateway path | Service | Forwarded as | Notes |
+|---|---|---|---|
+| `/api/identity/auth/...` | `identity:3001` | `/auth/...` | register, login, refresh, logout |
+| `/api/identity/users[/...]` | `identity:3001` | `/users[/...]` | `/users/me`, `/users/me/password`, admin user endpoints |
+| `/api/identity/audit[/...]` | `identity:3001` | `/audit[/...]` | admin |
+| `/api/orders[/...]` | `orders:3000` | `/orders[/...]` | place, cancel, confirm |
+| `/api/graphql` | `orders:3000` | `/graphql` | read model |
+| `/api/inventory/products[/...]` | `inventory:8081` | `/products[/...]` | public catalog |
+| `/api/notifications[/...]` | `notifications:8000` | `/notifications[/...]` | |
+
+Everything else answers `404` at the gateway: JWKS (`/.well-known/jwks.json`, which Orders and
+Notifications fetch over the internal network), Swagger UIs and OpenAPI documents, `/health*`,
+`/actuator/*`, the Traefik dashboard.
+
+### Middlewares
+
+Every route goes through, in order:
+
+| Middleware | Setting |
+|---|---|
+| Rate limit (global) | per client IP: 50 req/s average, burst 100 → `429` |
+| Rate limit (auth) | only `/api/identity/auth/login`, `/auth/register`, `/auth/refresh`, `/users/me/password`: 10 per minute per IP, burst 5 → `429` |
+| CORS | origins from `GATEWAY_CORS_ORIGINS` (comma-separated, exact match; default `http://localhost:5173`); methods `GET POST PUT PATCH DELETE OPTIONS`; headers `Authorization`, `Content-Type`; no credentials; preflight answered by the gateway |
+| Security headers | `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, `Permissions-Policy: camera=(), microphone=(), geolocation=()`, `Content-Security-Policy: default-src 'none'; frame-ancestors 'none'`; `Server` and `X-Powered-By` removed. HSTS is prepared but commented out (TLS only) |
+| Body limit | request bodies over 1 MB → `413` (buffered) |
+| Compression | gzip/brotli when the client accepts it |
+
+Timeouts: 30 s to read a request and to write a response, 60 s idle keep-alive (entrypoint);
+5 s to connect and 30 s for response headers towards a service. Access logs go to stdout as JSON
+(`docker compose logs gateway`) with `Authorization` and `Cookie` written as `REDACTED`.
+
+### Direct access for debugging
+
+`docker-compose.dev.yml` publishes the services' ports again (`3000`, `3001`, `8000`, `8081`) and
+sets their own `CORS_ALLOWED_ORIGINS` to `http://localhost:5173`. The gateway keeps working
+alongside:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.dev.yml --profile apps up -d
+```
+
+To go back, run the plain `docker compose --profile apps up -d`. The `gateway-debug` profile
+starts a second Traefik bound to `127.0.0.1` only, with the dashboard and the Swagger UIs:
+
+```bash
+docker compose --profile apps --profile gateway-debug up -d
+```
+
+| URL | What |
+|---|---|
+| http://127.0.0.1:8091/dashboard/ | Traefik dashboard (of the debug instance) |
+| http://127.0.0.1:9000/api | Orders Swagger UI |
+| http://127.0.0.1:9001/docs | Identity Swagger UI |
+| http://127.0.0.1:9081/swagger-ui/index.html | Inventory Swagger UI |
+| http://127.0.0.1:9080/docs | Notifications docs |
+
+These serve the documentation only; "Try it out" calls are not routed there. Use the gateway URLs
+instead, or the dev override.
+
+### Security notes
+
+- **The gateway** is the single entry point. It limits request rates and body sizes, applies
+  timeouts, answers CORS, adds the security headers, hides `Server` / `X-Powered-By`, and exposes
+  only the API routes above. It discards `X-Forwarded-*` headers sent by clients and sets its own.
+- **The services still** verify every access token (signature against Identity's JWKS, issuer,
+  audience, expiry), check roles and ownership, validate input, and apply their own CORS policy
+  (empty behind the gateway, so they add no CORS headers) and Identity's own login and
+  registration throttling. The gateway is defense in depth, not the only control: a request that
+  reaches a service by another path is still checked.
+- **JWT validation stays in the services.** Each service decides who may do what with its own data
+  (a customer's own orders, admin-only routes), which needs the token's claims at the service
+  anyway; validating only at the edge would make every service trust whatever reaches it on the
+  internal network. The gateway stays configuration-only and stateless.
+- **Identity throttling behind the gateway.** Identity limits by the TCP client address, which is
+  now the gateway's, so its per-IP buckets are shared by all clients (its per-email login limit
+  still applies). The gateway's per-IP auth limit restores per-client limiting at the edge. Making
+  Identity trust the gateway's `X-Forwarded-For` would need a change in Identity.
+- **In production** TLS is terminated at the gateway (an HTTPS entrypoint with certificates),
+  HTTP redirects to HTTPS, and HSTS is enabled by uncommenting `stsSeconds` in
+  `gateway/dynamic/routes.yml`. The debug profile and the dev override are never deployed.
 
 ## End-to-end demo
 
@@ -280,40 +378,40 @@ PowerShell (`curl` is an alias of `Invoke-WebRequest` in Windows PowerShell, so 
 
 ```powershell
 $cred = @{ email = 'alice@example.com'; password = 'a-long-password-1' }
-Invoke-RestMethod -Method Post http://localhost:3001/auth/register -ContentType 'application/json' `
+Invoke-RestMethod -Method Post http://localhost:8090/api/identity/auth/register -ContentType 'application/json' `
   -Body (@{ email = $cred.email; name = 'Alice'; password = $cred.password } | ConvertTo-Json)
-$tok = (Invoke-RestMethod -Method Post http://localhost:3001/auth/login -ContentType 'application/json' -Body ($cred | ConvertTo-Json)).accessToken
+$tok = (Invoke-RestMethod -Method Post http://localhost:8090/api/identity/auth/login -ContentType 'application/json' -Body ($cred | ConvertTo-Json)).accessToken
 $h = @{ Authorization = "Bearer $tok" }
 
 # Place an order (no customerId: it comes from the token)
 $body = @{ items = @(@{ productId = 'SKU-003'; quantity = 2; unitPrice = 19.99 }) } | ConvertTo-Json -Depth 5
-$r = Invoke-RestMethod -Method Post http://localhost:3000/orders -Headers $h -ContentType 'application/json' -Body $body
+$r = Invoke-RestMethod -Method Post http://localhost:8090/api/orders -Headers $h -ContentType 'application/json' -Body $body
 
 # Read it with GraphQL
 $q = @{ query = "{ order(orderId: `"$($r.orderId)`") { orderId status totalAmount cancellationReason items { productId quantity } } }" } | ConvertTo-Json
-(Invoke-RestMethod -Method Post http://localhost:3000/graphql -Headers $h -ContentType 'application/json' -Body $q).data.order
+(Invoke-RestMethod -Method Post http://localhost:8090/api/graphql -Headers $h -ContentType 'application/json' -Body $q).data.order
 
 # Read its notifications (newest first)
-(Invoke-RestMethod "http://localhost:8000/notifications?orderId=$($r.orderId)" -Headers $h).items | Format-Table type, message
+(Invoke-RestMethod "http://localhost:8090/api/notifications?orderId=$($r.orderId)" -Headers $h).items | Format-Table type, message
 ```
 
 curl (bash, Git Bash, WSL):
 
 ```bash
-curl -s -X POST localhost:3001/auth/register -H 'content-type: application/json' \
+curl -s -X POST localhost:8090/api/identity/auth/register -H 'content-type: application/json' \
   -d '{"email":"alice@example.com","name":"Alice","password":"a-long-password-1"}'
 # → 201 {"id":"…","customerId":"…","email":"alice@example.com","name":"Alice","roles":["CUSTOMER"],…}
-TOKEN=$(curl -s -X POST localhost:3001/auth/login -H 'content-type: application/json' \
+TOKEN=$(curl -s -X POST localhost:8090/api/identity/auth/login -H 'content-type: application/json' \
   -d '{"email":"alice@example.com","password":"a-long-password-1"}' | sed -E 's/.*"accessToken":"([^"]+)".*/\1/')
 
-curl -s -X POST localhost:3000/orders -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+curl -s -X POST localhost:8090/api/orders -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
   -d '{"items":[{"productId":"SKU-003","quantity":2,"unitPrice":19.99}]}'
 # → 201 {"orderId":"<id>"}
 
-curl -s localhost:3000/graphql -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+curl -s localhost:8090/api/graphql -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
   -d '{"query":"{ orders(limit: 10) { totalCount items { orderId status totalAmount cancellationReason } } }"}'
 
-curl -s "localhost:8000/notifications?orderId=<id>" -H "Authorization: Bearer $TOKEN"
+curl -s "localhost:8090/api/notifications?orderId=<id>" -H "Authorization: Bearer $TOKEN"
 # → {"items":[{"id":"…","customerId":"…","orderId":"<id>","type":"ORDER_CONFIRMED","channel":"email",
 #     "message":"Your order <id> was confirmed.","status":"SENT","createdAt":"…","sourceEventId":"…"},…],
 #    "total":2,"limit":20,"offset":0}
@@ -325,22 +423,22 @@ placed in the first instant after registration can answer `404` (customer not kn
 ### 3. Admin: every order, user and notification
 
 ```powershell
-$adm = (Invoke-RestMethod -Method Post http://localhost:3001/auth/login -ContentType 'application/json' `
+$adm = (Invoke-RestMethod -Method Post http://localhost:8090/api/identity/auth/login -ContentType 'application/json' `
   -Body (@{ email = 'admin@example.com'; password = 'Admin-Passw0rd!' } | ConvertTo-Json)).accessToken
 $ha = @{ Authorization = "Bearer $adm" }
 $q = @{ query = '{ orders(limit: 50) { totalCount items { orderId customerId status } } }' } | ConvertTo-Json
-(Invoke-RestMethod -Method Post http://localhost:3000/graphql -Headers $ha -ContentType 'application/json' -Body $q).data.orders.items
-(Invoke-RestMethod http://localhost:3001/users -Headers $ha).items | Format-Table email, roles, status
-(Invoke-RestMethod 'http://localhost:8000/notifications?limit=100' -Headers $ha).items | Format-Table customerId, type
+(Invoke-RestMethod -Method Post http://localhost:8090/api/graphql -Headers $ha -ContentType 'application/json' -Body $q).data.orders.items
+(Invoke-RestMethod http://localhost:8090/api/identity/users -Headers $ha).items | Format-Table email, roles, status
+(Invoke-RestMethod 'http://localhost:8090/api/notifications?limit=100' -Headers $ha).items | Format-Table customerId, type
 ```
 
 ```bash
-ADMIN=$(curl -s -X POST localhost:3001/auth/login -H 'content-type: application/json' \
+ADMIN=$(curl -s -X POST localhost:8090/api/identity/auth/login -H 'content-type: application/json' \
   -d '{"email":"admin@example.com","password":"Admin-Passw0rd!"}' | sed -E 's/.*"accessToken":"([^"]+)".*/\1/')
-curl -s localhost:3000/graphql -H "Authorization: Bearer $ADMIN" -H 'content-type: application/json' \
+curl -s localhost:8090/api/graphql -H "Authorization: Bearer $ADMIN" -H 'content-type: application/json' \
   -d '{"query":"{ orders(limit: 50) { totalCount items { orderId customerId status } } }"}'
-curl -s localhost:3001/users -H "Authorization: Bearer $ADMIN"
-curl -s "localhost:8000/notifications?limit=100" -H "Authorization: Bearer $ADMIN"
+curl -s localhost:8090/api/identity/users -H "Authorization: Bearer $ADMIN"
+curl -s "localhost:8090/api/notifications?limit=100" -H "Authorization: Bearer $ADMIN"
 ```
 
 A second customer (register and log in as `bob@example.com`) gets `totalCount: 0`, an empty
@@ -417,7 +515,7 @@ rows alone.
   An invalid `ADMIN_EMAIL` / `ADMIN_PASSWORD` also stops startup, with a message naming the
   variable. On a Linux host the key is written with mode 0600, so it must be readable by uid 1000
   (the image's `node` user); Docker Desktop on Windows and macOS is not affected.
-- **No notifications for an order**: run `curl localhost:8000/health/ready`. It answers 503 when
+- **No notifications for an order**: run `docker compose exec notifications python -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8000/health/ready').read().decode())"`. It answers 503 when
   MongoDB is unreachable, and `"kafka"` should be `CONNECTED` (`CONNECTING` or `DISCONNECTED`
   means the consumer is still retrying Kafka; the API keeps answering meanwhile). Then
   `docker compose logs -f notifications`: each recorded notification logs a line on
@@ -427,10 +525,10 @@ rows alone.
   `docker compose exec mongo mongosh -u mongo_user -p mongo_pass --authenticationDatabase admin notifications --eval 'db.inbound_dead_letters.find()'`.
   A refund whose order placement was never received is dead-lettered with
   `errorType: "OrderContextNotFoundError"` and is not recorded later.
-- **Browser call blocked by CORS**: the page's origin is not in `CORS_ALLOWED_ORIGINS` (default
+- **Browser call blocked by CORS**: the page's origin is not in `GATEWAY_CORS_ORIGINS` (default
   `http://localhost:5173`). Set it in the host environment and recreate the containers with
   `docker compose --profile apps up -d` (see [CORS](#cors)).
-- **`port is already allocated` on 9092, 8000, 8081 or 3001**: often another project's Kafka
+- **`port is already allocated` on 9092, 8090 or (with the dev override) 8000, 8081, 3001**: often another project's Kafka
   container, or a Notifications (`uvicorn --port 8000`), Inventory (Spring Boot, 8081) or Identity
   (`npm run start:dev`, 3001) dev server still running from the IDE. `docker ps` and
   `netstat -ano | findstr :8000` show the owner.
@@ -448,3 +546,10 @@ rows alone.
   keep flowing. Start Identity (`docker compose start identity`); requests succeed again within
   about a minute (the key refetch is throttled). Keys already cached keep working while Identity is
   down.
+- **`429` from the gateway**: more than 10 calls per minute to login, register, refresh or the
+  password change from one IP (burst 5), or more than 50 req/s overall. Wait a minute.
+- **`413`**: the request body is over 1 MB.
+- **`404` from `localhost:8090`**: the path is not one of the [gateway routes](#routes) (Swagger,
+  health and JWKS are not exposed; use the `gateway-debug` profile or `docker-compose.dev.yml`).
+- **`connection refused` on 3000, 3001, 8000 or 8081**: expected; those ports are only published
+  with `docker-compose.dev.yml`.

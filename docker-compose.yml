@@ -193,11 +193,10 @@ services:
       JWT_ISSUER: *jwt-issuer
       JWT_AUDIENCE: *jwt-audience
       JWT_CLOCK_TOLERANCE_SECONDS: ${JWT_CLOCK_TOLERANCE_SECONDS:-5}
-      # Browser origins allowed to call REST and /graphql; override from the host environment.
-      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:5173}
+      # Empty: the gateway handles CORS (GATEWAY_CORS_ORIGINS). Set it for direct browser access.
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-}
     # Orders applies its TypeORM migrations itself on startup (DB_MIGRATIONS_RUN, default true).
-    ports:
-      - "3000:3000"
+    # No host port: reached through the gateway (or docker-compose.dev.yml for direct access).
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:3000/api || exit 1"]
       interval: 10s
@@ -266,10 +265,8 @@ services:
       DB_PASSWORD: inventory_pass
       KAFKA_BOOTSTRAP_SERVERS: kafka:29092
       SERVER_PORT: "8081"
-      # Browser origins allowed to call the catalog (GET only); override from the host environment.
-      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:5173}
-    ports:
-      - "8081:8081"
+      # Empty: the gateway handles CORS (GATEWAY_CORS_ORIGINS). Set it for direct browser access.
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-}
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:8081/actuator/health || exit 1"]
       interval: 15s
@@ -309,10 +306,8 @@ services:
       JWT_ISSUER: *jwt-issuer
       JWT_AUDIENCE: *jwt-audience
       JWT_CLOCK_TOLERANCE_SECONDS: ${JWT_CLOCK_TOLERANCE_SECONDS:-5}
-      # Browser origins allowed to call the API (GET only); override from the host environment.
-      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:5173}
-    ports:
-      - "8000:8000"
+      # Empty: the gateway handles CORS (GATEWAY_CORS_ORIGINS). Set it for direct browser access.
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-}
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=3)"]
       interval: 10s
@@ -351,22 +346,61 @@ services:
       JWT_ISSUER: *jwt-issuer
       JWT_AUDIENCE: *jwt-audience
       JWT_PRIVATE_KEY_PATH: /run/keys/private.pem
-      # Browser origins allowed to call the API; override from the host environment.
-      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:5173}
+      # Empty: the gateway handles CORS (GATEWAY_CORS_ORIGINS). Set it for direct browser access.
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-}
       # Passed through from the host; empty when unset (then no admin is seeded).
       ADMIN_EMAIL: ${ADMIN_EMAIL:-}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
       ADMIN_NAME: ${ADMIN_NAME:-}
     volumes:
       - ../ecommerce-identity/keys:/run/keys:ro
-    ports:
-      - "3001:3001"
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:3001/health || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 6
       start_period: 30s
+
+  # ---------------------------------------------------------------- API gateway (Traefik)
+  # The only published entry to the application APIs: http://localhost:8090/api/...
+  # File provider only (gateway/, mounted read-only); no Docker socket; dashboard and API off.
+  gateway:
+    profiles: ["apps"]
+    image: traefik:v3.3
+    restart: unless-stopped
+    depends_on:
+      identity:
+        condition: service_started
+      orders:
+        condition: service_started
+      inventory:
+        condition: service_started
+      notifications:
+        condition: service_started
+    environment:
+      # Comma-separated browser origins allowed by the gateway's CORS (exact match, no wildcard).
+      GATEWAY_CORS_ORIGINS: ${GATEWAY_CORS_ORIGINS:-http://localhost:5173}
+    volumes:
+      - ./gateway/traefik.yml:/etc/traefik/traefik.yml:ro
+      - ./gateway/dynamic:/etc/traefik/dynamic:ro
+    ports:
+      - "8090:8090"
+
+  # Debug only (docker compose --profile apps --profile gateway-debug up -d): Traefik dashboard
+  # on 127.0.0.1:8091 and the Swagger UIs on 127.0.0.1:9000 (Orders), 9001 (Identity),
+  # 9081 (Inventory), 9080 (Notifications). Bound to loopback, never exposed to the network.
+  gateway-debug:
+    profiles: ["gateway-debug"]
+    image: traefik:v3.3
+    restart: "no"
+    volumes:
+      - ./gateway/debug:/etc/traefik:ro
+    ports:
+      - "127.0.0.1:8091:8080"
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
+      - "127.0.0.1:9081:9081"
+      - "127.0.0.1:9080:9080"
 
 volumes:
   kafka-data:

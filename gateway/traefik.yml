@@ -1,0 +1,45 @@
+# Traefik static configuration for the API gateway (compose service "gateway").
+# File provider only: no Docker socket, no service discovery. Dashboard and API are off.
+
+global:
+  checkNewVersion: false
+  sendAnonymousUsage: false
+
+entryPoints:
+  web:
+    address: ":8090"
+    transport:
+      respondingTimeouts:
+        readTimeout: 30s    # whole request, body included
+        writeTimeout: 30s   # whole response
+        idleTimeout: 60s    # keep-alive connections
+    # No trustedIPs: X-Forwarded-* sent by clients are discarded and Traefik sets its own.
+
+# Timeouts towards the services.
+serversTransport:
+  forwardingTimeouts:
+    dialTimeout: 5s
+    responseHeaderTimeout: 30s
+    idleConnTimeout: 90s
+
+providers:
+  file:
+    directory: /etc/traefik/dynamic
+    watch: false
+
+log:
+  level: INFO
+  format: json
+
+accessLog:
+  format: json
+  fields:
+    defaultMode: keep
+    headers:
+      defaultMode: drop
+      names:
+        Authorization: redact
+        Cookie: redact
+        Content-Type: keep
+        Origin: keep
+        User-Agent: keep

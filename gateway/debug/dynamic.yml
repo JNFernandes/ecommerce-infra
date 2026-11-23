@@ -1,0 +1,35 @@
+# Swagger UIs and OpenAPI documents only, one entrypoint per service, no path rewriting (the
+# UIs load their assets from absolute paths). "Try it out" calls are not routed here.
+
+http:
+  routers:
+    docs-orders:
+      entryPoints: [docs-orders]
+      rule: PathPrefix(`/api`)            # /api (UI), /api-json
+      service: orders
+    docs-identity:
+      entryPoints: [docs-identity]
+      rule: PathPrefix(`/docs`)           # /docs (UI), /docs-json
+      service: identity
+    docs-inventory:
+      entryPoints: [docs-inventory]
+      rule: PathPrefix(`/swagger-ui`) || PathPrefix(`/v3/api-docs`)
+      service: inventory
+    docs-notifications:
+      entryPoints: [docs-notifications]
+      rule: PathPrefix(`/docs`) || Path(`/openapi.json`)
+      service: notifications
+
+  services:
+    identity:
+      loadBalancer:
+        servers: [{ url: "http://identity:3001" }]
+    orders:
+      loadBalancer:
+        servers: [{ url: "http://orders:3000" }]
+    inventory:
+      loadBalancer:
+        servers: [{ url: "http://inventory:8081" }]
+    notifications:
+      loadBalancer:
+        servers: [{ url: "http://notifications:8000" }]

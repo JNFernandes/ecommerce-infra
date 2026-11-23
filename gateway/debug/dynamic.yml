@@ -19,6 +19,10 @@ http:
       entryPoints: [docs-notifications]
       rule: PathPrefix(`/docs`) || Path(`/openapi.json`)
       service: notifications
+    docs-ai:
+      entryPoints: [docs-ai]
+      rule: PathPrefix(`/docs`) || Path(`/openapi.json`)
+      service: ai
 
   services:
     identity:
@@ -33,3 +37,6 @@ http:
     notifications:
       loadBalancer:
         servers: [{ url: "http://notifications:8000" }]
+    ai:
+      loadBalancer:
+        servers: [{ url: "http://ai:8002" }]

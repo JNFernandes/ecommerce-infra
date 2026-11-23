@@ -16,6 +16,8 @@ entryPoints:
     address: ":9081"
   docs-notifications: # host 127.0.0.1:9080
     address: ":9080"
+  docs-ai:            # host 127.0.0.1:9002
+    address: ":9002"
 
 api:
   dashboard: true

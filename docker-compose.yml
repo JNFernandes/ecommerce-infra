@@ -52,7 +52,7 @@ services:
         for t in orders.order-placed orders.order-confirmed orders.order-cancelled \
                  payments.payment-processed payments.payment-failed payments.payment-refunded \
                  inventory.stock-reserved inventory.stock-rejected inventory.stock-released \
-                 identity.user-registered; do
+                 identity.user-registered ai.order-triage-completed; do
           kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists \
             --topic "$$t" --partitions 3 --replication-factor 1
         done
@@ -135,6 +135,23 @@ services:
       - identity-pg-data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U identity_user -d identity"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  postgres-ai:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ecommerce_ai
+      POSTGRES_USER: ai_user
+      POSTGRES_PASSWORD: ai_pass
+    ports:
+      - "5436:5432"
+    volumes:
+      - ai-pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ai_user -d ecommerce_ai"]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -361,6 +378,51 @@ services:
       retries: 6
       start_period: 30s
 
+  # MCP tools, order triage and the conversational assistant (bootstrap: only /health and
+  # /ready so far). Starts and stays alive without Kafka, PostgreSQL or an LLM key; /ready is 503
+  # while PostgreSQL is down, so the healthcheck uses the liveness probe /health. It calls the
+  # platform APIs through the gateway with the caller's own token (docs/events.md, HTTP APIs).
+  # No host port and no gateway route yet: the route arrives with its first API. Port 8002.
+  # The LLM settings come from the host environment; no API key is passed until a story needs it.
+  ai:
+    profiles: ["apps"]
+    build:
+      context: ../ecommerce-ai
+      dockerfile: Dockerfile
+    restart: on-failure
+    depends_on:
+      kafka:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+      postgres-ai:
+        condition: service_healthy
+      identity:
+        # Started only: the service also starts and serves health without Identity.
+        condition: service_started
+    environment:
+      PORT: "8002"
+      DATABASE_URL: postgresql://ai_user:ai_pass@postgres-ai:5432/ecommerce_ai
+      KAFKA_BROKERS: kafka:29092
+      IDENTITY_JWKS_URL: http://identity:3001/.well-known/jwks.json
+      JWT_ISSUER: *jwt-issuer
+      JWT_AUDIENCE: *jwt-audience
+      JWT_CLOCK_TOLERANCE_SECONDS: ${JWT_CLOCK_TOLERANCE_SECONDS:-5}
+      ORDERS_BASE_URL: http://gateway:8090/api/orders
+      INVENTORY_BASE_URL: http://gateway:8090/api/inventory
+      NOTIFICATIONS_BASE_URL: http://gateway:8090/api/notifications
+      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-}
+      LLM_TIMEOUT_SECONDS: ${LLM_TIMEOUT_SECONDS:-30}
+      DAILY_TOKEN_BUDGET: ${DAILY_TOKEN_BUDGET:-50000}
+      # Empty: the gateway handles CORS (GATEWAY_CORS_ORIGINS). Set it for direct browser access.
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8002/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+
   # ---------------------------------------------------------------- API gateway (Traefik)
   # The only published entry to the application APIs: http://localhost:8090/api/...
   # File provider only (gateway/, mounted read-only); no Docker socket; dashboard and API off.
@@ -388,7 +450,7 @@ services:
 
   # Debug only (docker compose --profile apps --profile gateway-debug up -d): Traefik dashboard
   # on 127.0.0.1:8091 and the Swagger UIs on 127.0.0.1:9000 (Orders), 9001 (Identity),
-  # 9081 (Inventory), 9080 (Notifications). Bound to loopback, never exposed to the network.
+  # 9081 (Inventory), 9080 (Notifications), 9002 (AI). Bound to loopback, never exposed.
   gateway-debug:
     profiles: ["gateway-debug"]
     image: traefik:v3.7
@@ -401,6 +463,7 @@ services:
       - "127.0.0.1:9001:9001"
       - "127.0.0.1:9081:9081"
       - "127.0.0.1:9080:9080"
+      - "127.0.0.1:9002:9002"
 
 volumes:
   kafka-data:
@@ -408,4 +471,5 @@ volumes:
   inventory-pg-data:
   payments-pg-data:
   identity-pg-data:
+  ai-pg-data:
   mongo-data:

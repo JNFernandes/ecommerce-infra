@@ -366,7 +366,7 @@ services:
   # File provider only (gateway/, mounted read-only); no Docker socket; dashboard and API off.
   gateway:
     profiles: ["apps"]
-    image: traefik:v3.3
+    image: traefik:v3.7
     restart: unless-stopped
     depends_on:
       identity:
@@ -391,7 +391,7 @@ services:
   # 9081 (Inventory), 9080 (Notifications). Bound to loopback, never exposed to the network.
   gateway-debug:
     profiles: ["gateway-debug"]
-    image: traefik:v3.3
+    image: traefik:v3.7
     restart: "no"
     volumes:
       - ./gateway/debug:/etc/traefik:ro

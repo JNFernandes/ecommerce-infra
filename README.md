@@ -516,7 +516,7 @@ docker compose -f docker-compose.yml -f docker-compose.dev.yml --profile apps co
 docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.12
 docker run --rm -v "$PWD:/repo" ghcr.io/gitleaks/gitleaks:v8.30.1 git /repo --redact -v
 docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy image \
-  --ignore-unfixed --severity HIGH,CRITICAL traefik:v3.3
+  --ignore-unfixed --severity HIGH,CRITICAL traefik:v3.7
 ```
 
 The gateway smoke test is the script in `ci.yml` (job `gateway`), run against

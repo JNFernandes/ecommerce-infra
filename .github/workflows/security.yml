@@ -72,7 +72,7 @@ jobs:
         # infrastructure published only on the developer's machine; their findings are reported in
         # the Security tab without failing (threshold documented in the README).
         include:
-          - image: traefik:v3.3
+          - image: traefik:v3.7
             enforce: true
           - image: postgres:16-alpine
             enforce: false

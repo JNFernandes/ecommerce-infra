@@ -57,6 +57,10 @@ jobs:
 
           code=$(curl -s -o /dev/null -w '%{http_code}' $G/api/identity/.well-known/jwks.json)
           [ "$code" = 404 ] || fail "JWKS is routed through the gateway ($code)"
+          for p in /api/ai/mcp /api/ai/mcp/ /api/ai//mcp /api/ai/%6Dcp /api/ai/docs /api/ai/ready; do
+            code=$(curl -s -o /dev/null --path-as-is -w '%{http_code}' -X POST "$G$p")
+            [ "$code" = 404 ] || fail "$p is routed through the gateway ($code)"
+          done
           code=$(curl -s -o /dev/null -w '%{http_code}' $G/dashboard/)
           [ "$code" = 404 ] || fail "dashboard reachable ($code)"
 

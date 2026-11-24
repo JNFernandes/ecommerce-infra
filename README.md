@@ -73,7 +73,8 @@ API are specified in [docs/events.md](docs/events.md).
   ```
 
 - For Identity: Node.js 20+ on the host, once, to generate its signing key (see [First run](#first-run)).
-- Free host ports: 3000, 3001, 5432, 5433, 5434, 5435, 5436, 8000, 8002, 8080 (only with `tools`), 8081, 9092, 27017.
+- Free host ports: 5432, 5433, 5434, 5435, 5436, 8090 (gateway), 8080 (only with `tools`), 9092, 27017;
+  with `docker-compose.dev.yml` also 3000, 3001, 8000, 8002, 8081.
 
 ## First run
 
@@ -152,7 +153,7 @@ and the internal port.
 | Inventory (products API, Swagger UI at `/swagger-ui.html`, health at `/actuator/health`) | via gateway `/api/inventory/products` | `inventory:8081` | | |
 | Notifications (read API, docs at `/docs`, health at `/health/ready`) | via gateway `/api/notifications` | `notifications:8000` | | |
 | Identity (auth API, Swagger UI at `/docs`, health at `/health`, JWKS at `/.well-known/jwks.json`) | via gateway `/api/identity/...` | `identity:3001` | | |
-| AI (docs at `/docs`, health at `/health`, readiness at `/ready`) | no gateway route yet | `ai:8002` | | |
+| AI (docs at `/docs`, health at `/health`, readiness at `/ready`, MCP at `/mcp`) | via gateway `/api/ai/health` only | `ai:8002` | | |
 | Payments | not published | | | |
 | Kafka | `localhost:9092` | `kafka:29092` | | |
 | Kafka UI (`tools` profile) | `localhost:8080` | | | |
@@ -198,6 +199,38 @@ The seed runs only while no admin exists, so after a reset (`down -v`) set the v
 Compose also sets `JWT_ISSUER=http://localhost:3001` and `JWT_AUDIENCE=ecommerce`, the values
 other services must expect when they verify Identity's tokens.
 
+### AI service
+
+`ecommerce-ai` (port 8002, built from `../ecommerce-ai`) starts and stays healthy without Kafka,
+PostgreSQL or an LLM key; the healthcheck uses `/health` (liveness), since `/ready` is `503` while
+PostgreSQL is down. It calls Orders, Inventory and Notifications **through the gateway**
+(`http://gateway:8090/api/...`) with the caller's own token, and verifies tokens like the other
+services (same `IDENTITY_JWKS_URL`, `JWT_ISSUER`, `JWT_AUDIENCE`, `JWT_CLOCK_TOLERANCE_SECONDS`).
+
+LLM settings come from the host environment:
+
+| Variable | Compose default | Notes |
+|---|---|---|
+| `ANTHROPIC_API_KEY` | empty | **Secret. Never commit it** (not in compose, `.env.example` or the README). Set it only in your shell before `up`. Empty: every LLM step uses its deterministic fallback. |
+| `ANTHROPIC_MODEL` | empty | Model id, e.g. `claude-haiku-5-5`; empty also means fallback only. |
+| `DAILY_TOKEN_BUDGET` | `50000` | Hard cap on LLM tokens per UTC day (`0` = no LLM calls). |
+| `LLM_TIMEOUT_SECONDS` | `30` | Timeout of one LLM call. |
+
+```powershell
+$env:ANTHROPIC_API_KEY = Read-Host -AsSecureString | ConvertFrom-SecureString -AsPlainText  # PowerShell 7
+$env:ANTHROPIC_MODEL = 'claude-haiku-5-5'
+docker compose --profile apps up -d ai
+Remove-Item Env:ANTHROPIC_API_KEY
+```
+
+```bash
+read -rs ANTHROPIC_API_KEY && export ANTHROPIC_API_KEY ANTHROPIC_MODEL=claude-haiku-5-5
+docker compose --profile apps up -d ai
+```
+
+Direct access on `localhost:8002` (`/docs`, `/ready`, `/mcp`) needs the dev override:
+`docker compose -f docker-compose.yml -f docker-compose.dev.yml --profile apps up -d`.
+
 ## HTTP APIs
 
 Four services have an HTTP API for clients such as a browser frontend, reached through the
@@ -230,6 +263,7 @@ Notifications. Both start without Identity (`depends_on` is `service_started` on
 | Orders | Swagger only; every API call is 401 (GraphQL: `UNAUTHENTICATED` error) | `POST /orders` for themselves (no `customerId` in the body); cancel own `PENDING` orders; GraphQL `order` / `orders` return only their own (another customer's order is `null`, cancelling it 404) | every order in GraphQL (`customerId` filter allowed); cancel and confirm any order; cannot place orders (403) |
 | Notifications | `/health/live`, `/health/ready`, `/docs`; `/notifications` is 401 | only their own notifications (another customer's are invisible: empty list / 404) | every notification, any `customerId` filter |
 | Inventory | `GET /products`, `GET /products/{id}`, health (no authentication) | same | same |
+| AI | `/api/ai/health` (gateway); `/mcp` is internal only | — | — |
 | Payments | no HTTP API | — | — |
 
 ### CORS
@@ -261,7 +295,8 @@ Created by `kafka-init` with 3 partitions and replication factor 1 (auto-creatio
 `orders.order-placed`, `orders.order-confirmed`, `orders.order-cancelled`,
 `payments.payment-processed`, `payments.payment-failed`, `payments.payment-refunded`,
 `inventory.stock-reserved`, `inventory.stock-rejected`, `inventory.stock-released`,
-`identity.user-registered`, `ai.order-triage-completed` (planned publisher: AI).
+`identity.user-registered`, `ai.order-triage-completed` (11 topics; planned publisher: AI, advisory
+only, see [docs/events.md](docs/events.md#ai-events)).
 
 ## API gateway
 
@@ -283,9 +318,19 @@ is not mounted, and the dashboard and API are off.
 | `/api/graphql` | `orders:3000` | `/graphql` | read model |
 | `/api/inventory/products[/...]` | `inventory:8081` | `/products[/...]` | public catalog |
 | `/api/notifications[/...]` | `notifications:8000` | `/notifications[/...]` | |
+| `/api/ai/health` | `ai:8002` | `/health` | liveness; stricter rate limit (below) |
 
-AI has no route yet: it is added with its first API (the assistant or the MCP endpoint). Its
-SSE streams will need a longer write timeout than the entrypoint's 30 s.
+AI is routed by **allowlist**: each AI endpoint is added to the rule in `gateway/dynamic/routes.yml`
+explicitly, never a whole `/api/ai/` prefix. Its future SSE streams will need a longer write
+timeout than the entrypoint's 30 s.
+
+**`/mcp` is not exposed through the gateway** (`/api/ai/mcp` answers `404`, which the CI smoke test
+checks). MCP is a tool protocol for agents running inside the platform, not a client API: each
+call fans out to several platform reads, so exposing it would let any client multiply its load on
+Orders, Inventory and Notifications past the per-route limits. It would also widen the attack
+surface of a tool layer meant to drive an LLM, and it has no browser use. Agents reach it on the
+internal network at `http://ai:8002/mcp` with the caller's token. For local debugging use the dev
+override (`localhost:8002/mcp`).
 
 Everything else answers `404` at the gateway: JWKS (`/.well-known/jwks.json`, which Orders and
 Notifications fetch over the internal network), Swagger UIs and OpenAPI documents, `/health*`,
@@ -299,6 +344,7 @@ Every route goes through, in order:
 |---|---|
 | Rate limit (global) | per client IP: 50 req/s average, burst 100 → `429` |
 | Rate limit (auth) | only `/api/identity/auth/login`, `/auth/register`, `/auth/refresh`, `/users/me/password`: 10 per minute per IP, burst 5 → `429` |
+| Rate limit (AI) | only `/api/ai/...`: 25 req/s per IP, burst 50 (half the global limit; AI routes will call a paid LLM) → `429` |
 | CORS | origins from `GATEWAY_CORS_ORIGINS` (comma-separated, exact match; default `http://localhost:5173`); methods `GET POST PUT PATCH DELETE OPTIONS`; headers `Authorization`, `Content-Type`; no credentials; preflight answered by the gateway |
 | Security headers | `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, `Permissions-Policy: camera=(), microphone=(), geolocation=()`, `Content-Security-Policy: default-src 'none'; frame-ancestors 'none'`; `Server` and `X-Powered-By` removed. HSTS is prepared but commented out (TLS only) |
 | Body limit | request bodies over 1 MB → `413` (buffered) |

@@ -207,7 +207,8 @@ and a failed publish is dead-lettered and redelivered unchanged, as for every ot
 | `suggestedAction` | string | One of the actions below. Advice for a human; the AI never carries it out. |
 | `confidence` | number | From 0 to 1. |
 | `promptVersion` | string | Version of the prompt that produced the result, for example `triage.v1`. |
-| `modelId` | string | The LLM model id, or `template:<name>` when the deterministic fallback produced the result (no model was called). |
+| `modelId` | string or `null` | The LLM model id when `source` is `LLM`; `null` when `source` is `FALLBACK_TEMPLATE` (no model was called). |
+| `source` | string | `LLM` (a model produced the result) or `FALLBACK_TEMPLATE` (the deterministic template did: no model configured, budget spent, LLM error or invalid LLM output). |
 
 `cause`:
 
@@ -229,14 +230,20 @@ and a failed publish is dead-lettered and redelivered unchanged, as for every ot
 | `REVIEW` | A person should investigate |
 | `NONE` | Nothing to do (for example a cancellation the customer asked for) |
 
-Adding a `cause` or `suggestedAction` value is a schema change: it bumps `version`.
+Adding a `cause`, `suggestedAction` or `source` value is a schema change: it bumps `version`.
+
+**Advisory only.** The result is information for people. No service may move money or change
+state because of it: no refund, cancellation, confirmation, stock change or notification is
+triggered by this event, and no consumer may treat `suggestedAction` as a command. A consumer may
+only store or display it.
 
 ```json
 {
   "eventId": "6f1c…", "aggregateId": "<orderId>", "occurredAt": "2026-11-23T20:00:00.000Z", "version": 1,
   "orderId": "<orderId>", "cause": "INSUFFICIENT_STOCK",
   "explanation": "Stock for product SKU-002 was short by 3 units, so nothing was reserved and the order was cancelled.",
-  "suggestedAction": "RESTOCK", "confidence": 0.92, "promptVersion": "triage.v1", "modelId": "claude-haiku-5-5"
+  "suggestedAction": "RESTOCK", "confidence": 0.92, "promptVersion": "triage.v1", "modelId": "claude-haiku-5-5",
+  "source": "LLM"
 }
 ```
 

@@ -193,11 +193,14 @@ explained why an order failed. **`aggregateId` is the order id** (like Orders ev
 Payments and Inventory events), and it is the Kafka message key.
 
 The worker consumes `orders.order-cancelled`, `payments.payment-failed` and
-`inventory.stock-rejected` (consumer group `ai-triage`) and publishes one result per consumed
-event, idempotently by that event's `eventId`. A failed order therefore usually gets two results:
-one for the failed outcome and one for the cancellation it causes. Each result has its own new
-`eventId`; a republish of the same result keeps it. The result is saved before it is published,
-and a failed publish is dead-lettered and redelivered unchanged, as for every other event.
+`inventory.stock-rejected` (consumer group `ai-triage`) and groups them by order into one case.
+Once no new event has arrived for the order for a few seconds, it publishes **one result per
+order**: a failed order and the cancellation it causes give a single result, and events that
+arrive after it do not produce another. The result has its own new `eventId`; a republish of it
+keeps that `eventId`. The result and its outgoing event are saved in one transaction (a
+transactional outbox) and published afterwards; a failed publish stays in the outbox and is
+retried with backoff, unchanged and with the same `eventId`, so delivery is at-least-once.
+`modelId` is `null` only when `source` is `FALLBACK_TEMPLATE`.
 
 | Field | Type | Notes |
 |---|---|---|

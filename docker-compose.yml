@@ -382,8 +382,10 @@ services:
   # /ready so far). Starts and stays alive without Kafka, PostgreSQL or an LLM key; /ready is 503
   # while PostgreSQL is down, so the healthcheck uses the liveness probe /health. It calls the
   # platform APIs through the gateway with the caller's own token (docs/events.md, HTTP APIs).
-  # No host port and no gateway route yet: the route arrives with its first API. Port 8002.
-  # The LLM settings come from the host environment; no API key is passed until a story needs it.
+  # Port 8002, no host port (docker-compose.dev.yml publishes it). Through the gateway only
+  # /api/ai/health is exposed; /mcp stays internal (see the README, "API gateway").
+  # The LLM settings come from the host environment. ANTHROPIC_API_KEY is never committed: empty
+  # unless set on the host, and then every LLM step uses its deterministic fallback.
   ai:
     profiles: ["apps"]
     build:
@@ -410,7 +412,10 @@ services:
       JWT_CLOCK_TOLERANCE_SECONDS: ${JWT_CLOCK_TOLERANCE_SECONDS:-5}
       ORDERS_BASE_URL: http://gateway:8090/api/orders
       INVENTORY_BASE_URL: http://gateway:8090/api/inventory
-      NOTIFICATIONS_BASE_URL: http://gateway:8090/api/notifications
+      # ecommerce-ai appends /notifications itself.
+      NOTIFICATIONS_BASE_URL: http://gateway:8090/api
+      ORDERS_GRAPHQL_URL: http://gateway:8090/api/graphql
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-}
       LLM_TIMEOUT_SECONDS: ${LLM_TIMEOUT_SECONDS:-30}
       DAILY_TOKEN_BUDGET: ${DAILY_TOKEN_BUDGET:-50000}
@@ -438,6 +443,8 @@ services:
       inventory:
         condition: service_started
       notifications:
+        condition: service_started
+      ai:
         condition: service_started
     environment:
       # Comma-separated browser origins allowed by the gateway's CORS (exact match, no wildcard).

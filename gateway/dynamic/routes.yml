@@ -8,7 +8,10 @@
 #   /api/graphql                          -> orders:3000/graphql
 #   /api/inventory/products[/...]         -> inventory:8081/products[/...]
 #   /api/notifications[/...]              -> notifications:8000/notifications[/...]
-# Anything else (JWKS, Swagger UIs, health, actuator) has no route and answers 404.
+#   /api/ai/health                        -> ai:8002/health (allowlist: AI paths are added one
+#                                            by one; /mcp is internal and never routed)
+# Anything else (JWKS, Swagger UIs, other health checks, actuator, /api/ai/mcp) has no route
+# and answers 404.
 
 http:
   routers:
@@ -55,6 +58,14 @@ http:
       middlewares: [api, strip-api]
       service: notifications
 
+    # Allowlist, not a prefix: a new AI endpoint is exposed only when added here. /mcp must never
+    # be (internal tool protocol; see the README, "API gateway").
+    ai:
+      entryPoints: [web]
+      rule: Path(`/api/ai/health`)
+      middlewares: [rate-limit-ai, api, strip-ai]
+      service: ai
+
   middlewares:
     # Applied to every route, in this order.
     api:
@@ -72,6 +83,12 @@ http:
         average: 10
         period: 1m
         burst: 5
+    # Half the global limit: AI routes will call a paid LLM.
+    rate-limit-ai:
+      rateLimit:
+        average: 25
+        period: 1s
+        burst: 50
 
     # (b) Security headers. Empty custom values remove the header from the response.
     security-headers:
@@ -122,6 +139,9 @@ http:
     strip-inventory:
       stripPrefix:
         prefixes: ["/api/inventory"]
+    strip-ai:
+      stripPrefix:
+        prefixes: ["/api/ai"]
 
   services:
     identity:
@@ -136,3 +156,6 @@ http:
     notifications:
       loadBalancer:
         servers: [{ url: "http://notifications:8000" }]
+    ai:
+      loadBalancer:
+        servers: [{ url: "http://ai:8002" }]

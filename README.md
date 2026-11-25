@@ -153,7 +153,7 @@ and the internal port.
 | Inventory (products API, Swagger UI at `/swagger-ui.html`, health at `/actuator/health`) | via gateway `/api/inventory/products` | `inventory:8081` | | |
 | Notifications (read API, docs at `/docs`, health at `/health/ready`) | via gateway `/api/notifications` | `notifications:8000` | | |
 | Identity (auth API, Swagger UI at `/docs`, health at `/health`, JWKS at `/.well-known/jwks.json`) | via gateway `/api/identity/...` | `identity:3001` | | |
-| AI (docs at `/docs`, health at `/health`, readiness at `/ready`, MCP at `/mcp`) | via gateway `/api/ai/health` only | `ai:8002` | | |
+| AI (docs at `/docs`, health at `/health`, readiness at `/ready`, MCP at `/mcp`, chat at `/chat`) | via gateway `/api/ai/health` and `/api/ai/chat/...` | `ai:8002` | | |
 | Payments | not published | | | |
 | Kafka | `localhost:9092` | `kafka:29092` | | |
 | Kafka UI (`tools` profile) | `localhost:8080` | | | |
@@ -263,7 +263,7 @@ Notifications. Both start without Identity (`depends_on` is `service_started` on
 | Orders | Swagger only; every API call is 401 (GraphQL: `UNAUTHENTICATED` error) | `POST /orders` for themselves (no `customerId` in the body); cancel own `PENDING` orders; GraphQL `order` / `orders` return only their own (another customer's order is `null`, cancelling it 404) | every order in GraphQL (`customerId` filter allowed); cancel and confirm any order; cannot place orders (403) |
 | Notifications | `/health/live`, `/health/ready`, `/docs`; `/notifications` is 401 | only their own notifications (another customer's are invisible: empty list / 404) | every notification, any `customerId` filter |
 | Inventory | `GET /products`, `GET /products/{id}`, health (no authentication) | same | same |
-| AI | `/api/ai/health` (gateway); `/mcp` is internal only | — | — |
+| AI | `/api/ai/health` (gateway); `/mcp` is internal only | `/api/ai/chat/...`: their own conversations and streamed answers (another user's id is 404) | same (any role) |
 | Payments | no HTTP API | — | — |
 
 ### CORS
@@ -319,10 +319,14 @@ is not mounted, and the dashboard and API are off.
 | `/api/inventory/products[/...]` | `inventory:8081` | `/products[/...]` | public catalog |
 | `/api/notifications[/...]` | `notifications:8000` | `/notifications[/...]` | |
 | `/api/ai/health` | `ai:8002` | `/health` | liveness; stricter rate limit (below) |
+| `/api/ai/chat/conversations[/{id}]` | `ai:8002` | `/chat/conversations[/{id}]` | the customer's chat conversations (create, list, read, delete) |
+| `/api/ai/chat/conversations/{id}/messages` | `ai:8002` | `/chat/conversations/{id}/messages` | streamed answer (SSE); no buffering or compression, body limited to 16 KB by ecommerce-ai |
 
 AI is routed by **allowlist**: each AI endpoint is added to the rule in `gateway/dynamic/routes.yml`
-explicitly, never a whole `/api/ai/` prefix. Its future SSE streams will need a longer write
-timeout than the entrypoint's 30 s.
+explicitly, never a whole `/api/ai/` prefix. The chat stream route uses the `api-stream` chain
+(the `api` chain without `body-limit` and `compress`): the buffering body limit would hold the
+whole SSE response back, so ecommerce-ai enforces its own 16 KB limit (`413 PAYLOAD_TOO_LARGE`).
+The frozen chat contract is `docs/chat-contract.md` in ecommerce-ai.
 
 **`/mcp` is not exposed through the gateway** (`/api/ai/mcp` answers `404`, which the CI smoke test
 checks). MCP is a tool protocol for agents running inside the platform, not a client API: each
@@ -347,10 +351,11 @@ Every route goes through, in order:
 | Rate limit (AI) | only `/api/ai/...`: 25 req/s per IP, burst 50 (half the global limit; AI routes will call a paid LLM) → `429` |
 | CORS | origins from `GATEWAY_CORS_ORIGINS` (comma-separated, exact match; default `http://localhost:5173`); methods `GET POST PUT PATCH DELETE OPTIONS`; headers `Authorization`, `Content-Type`; no credentials; preflight answered by the gateway |
 | Security headers | `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, `Permissions-Policy: camera=(), microphone=(), geolocation=()`, `Content-Security-Policy: default-src 'none'; frame-ancestors 'none'`; `Server` and `X-Powered-By` removed. HSTS is prepared but commented out (TLS only) |
-| Body limit | request bodies over 1 MB → `413` (buffered) |
-| Compression | gzip/brotli when the client accepts it |
+| Body limit | request bodies over 1 MB → `413` (buffered); not on the chat stream route (`api-stream`) |
+| Compression | gzip/brotli when the client accepts it; not on the chat stream route |
 
-Timeouts: 30 s to read a request and to write a response, 60 s idle keep-alive (entrypoint);
+Timeouts: 30 s to read a request, 300 s to write a response (an AI chat answer streams for a
+while), 60 s idle keep-alive (entrypoint);
 5 s to connect and 30 s for response headers towards a service. Access logs go to stdout as JSON
 (`docker compose logs gateway`) with `Authorization` and `Cookie` written as `REDACTED`.
 

@@ -10,6 +10,9 @@
 #   /api/notifications[/...]              -> notifications:8000/notifications[/...]
 #   /api/ai/health                        -> ai:8002/health (allowlist: AI paths are added one
 #                                            by one; /mcp is internal and never routed)
+#   /api/ai/chat/conversations[/{id}]     -> ai:8002/chat/conversations[/{id}]
+#   /api/ai/chat/conversations/{id}/messages -> ai:8002/... (SSE stream: no buffering, the
+#                                            service limits the body to 16 KB itself)
 # Anything else (JWKS, Swagger UIs, other health checks, actuator, /api/ai/mcp) has no route
 # and answers 404.
 
@@ -65,12 +68,29 @@ http:
       rule: Path(`/api/ai/health`)
       middlewares: [rate-limit-ai, api, strip-ai]
       service: ai
+    ai-chat:
+      entryPoints: [web]
+      rule: Path(`/api/ai/chat/conversations`) || PathRegexp(`^/api/ai/chat/conversations/[^/]+$`)
+      middlewares: [rate-limit-ai, api, strip-ai]
+      service: ai
+    # The answer streams as Server-Sent Events: body-limit (buffering) would hold the whole
+    # response back and compress would batch it, so this route uses api-stream. ecommerce-ai
+    # rejects bodies over 16 KB with 413 itself.
+    ai-chat-stream:
+      entryPoints: [web]
+      rule: PathRegexp(`^/api/ai/chat/conversations/[^/]+/messages$`)
+      middlewares: [rate-limit-ai, api-stream, strip-ai]
+      service: ai
 
   middlewares:
     # Applied to every route, in this order.
     api:
       chain:
         middlewares: [rate-limit-global, cors, security-headers, body-limit, compress]
+    # Streamed (SSE) routes: the same chain without buffering or compression.
+    api-stream:
+      chain:
+        middlewares: [rate-limit-global, cors, security-headers]
 
     # (a) Rate limits per client IP (the TCP peer address; client X-Forwarded-For is ignored).
     rate-limit-global:

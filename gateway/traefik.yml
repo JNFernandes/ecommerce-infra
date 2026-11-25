@@ -11,7 +11,7 @@ entryPoints:
     transport:
       respondingTimeouts:
         readTimeout: 30s    # whole request, body included
-        writeTimeout: 30s   # whole response
+        writeTimeout: 300s  # whole response; long enough for an AI chat answer streamed over SSE
         idleTimeout: 60s    # keep-alive connections
     http:
       # Drop headers whose name aliases another (X_Forwarded_For, X.Forwarded.For): ASGI/WSGI

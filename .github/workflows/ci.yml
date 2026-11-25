@@ -61,6 +61,18 @@ jobs:
             code=$(curl -s -o /dev/null --path-as-is -w '%{http_code}' -X POST "$G$p")
             [ "$code" = 404 ] || fail "$p is routed through the gateway ($code)"
           done
+          # Allowlisted chat routes reach the (absent) ai service: 502, not 404.
+          for p in /api/ai/chat/conversations /api/ai/chat/conversations/c1                    /api/ai/chat/conversations/c1/messages; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$G$p")
+            [ "$code" = 502 ] || fail "$p is not routed to ai ($code)"
+          done
+          for p in /api/ai/chat /api/ai/chat/ /api/ai/chat/conversations/c1/other                    /api/ai/chat/conversations/c1/messages/x; do
+            code=$(curl -s -o /dev/null --path-as-is -w '%{http_code}' -X POST "$G$p")
+            [ "$code" = 404 ] || fail "$p is routed through the gateway ($code)"
+          done
+          # The stream route is not buffered (ecommerce-ai limits its body): no 413 at the edge.
+          code=$(head -c 1100000 /dev/zero | curl -s -o /dev/null -w '%{http_code}' -X POST                    $G/api/ai/chat/conversations/c1/messages -H 'content-type: application/json'                    --data-binary @-)
+          [ "$code" = 502 ] || fail "chat stream route is buffered ($code)"
           code=$(curl -s -o /dev/null -w '%{http_code}' $G/dashboard/)
           [ "$code" = 404 ] || fail "dashboard reachable ($code)"
 
